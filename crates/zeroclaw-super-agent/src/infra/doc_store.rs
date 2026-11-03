@@ -7,7 +7,6 @@
 use anyhow::{Context, Result, bail};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::marker::PhantomData;
@@ -29,8 +28,10 @@ pub(crate) enum ExternalEditPolicy {
     Absorb,
 }
 
-/// One store persists a `DocumentModel` of its own type.
-pub(crate) trait DocumentModel: Serialize + DeserializeOwned + Clone + Send + Sync {
+/// One store persists a `DocumentModel` of its own type. Serialization is
+/// the model's own concern (infra DTOs); the trait only carries the names
+/// and the two render directions.
+pub(crate) trait DocumentModel: Clone + Send + Sync {
     const SCHEMA_VERSION: u32;
     const DOC_NAME: &'static str;
     const LOG_NAME: &'static str;
@@ -43,22 +44,58 @@ pub(crate) trait DocumentModel: Serialize + DeserializeOwned + Clone + Send + Sy
     fn body(&self) -> String;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RevisionEntry {
     id: u64,
     at: TimestampMs,
-    kind: ChangeKind,
+    /// `ChangeKind` in its persistence string form; the vocabulary mapping
+    /// lives in the domain, not here.
+    kind: String,
     note: String,
     fingerprint: u64,
     bytes: String,
+}
+
+impl RevisionEntry {
+    fn new(id: u64, at: TimestampMs, kind: ChangeKind, note: String, bytes: String) -> Self {
+        let fingerprint = fingerprint(&bytes).0;
+        Self {
+            id,
+            at,
+            kind: kind.as_str().to_owned(),
+            note,
+            fingerprint,
+            bytes,
+        }
+    }
+
+    fn kind(&self) -> Result<ChangeKind> {
+        ChangeKind::parse(&self.kind)
+            .ok_or_else(|| anyhow::Error::msg(format!("unknown revision kind: {}", self.kind)))
+    }
 }
 
 /// One revision-log entry is a full rendering snapshot, so rollback and
 /// restore are byte-exact without operation replay.
 pub(crate) struct MdDocumentStore<S: DocumentModel> {
     dir: Mutex<Dir>,
+    /// In-process log cache (ADR-SA-001): built once on first log access,
+    /// appended on commit, rebuilt when the on-disk tail id disagrees with
+    /// the cache tail (cross-process write reconciliation). The disk format
+    /// and the snapshot semantics are unchanged.
+    log_cache: Mutex<Option<Vec<RevisionEntry>>>,
     policy: ExternalEditPolicy,
     _model: PhantomData<S>,
+}
+
+/// The result of the cheap tail probe used by reconciliation: the last
+/// entry id, a definite absence of entries, or a tail that cannot be
+/// interpreted without reading the whole file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogTail {
+    Absent,
+    Id(u64),
+    Indeterminate,
 }
 
 impl<S: DocumentModel> MdDocumentStore<S> {
@@ -68,9 +105,99 @@ impl<S: DocumentModel> MdDocumentStore<S> {
         let dir = Dir::open_ambient_dir(root, ambient_authority())?;
         Ok(Self {
             dir: Mutex::new(dir),
+            log_cache: Mutex::new(None),
             policy,
             _model: PhantomData,
         })
+    }
+
+    fn lock_log(&self) -> MutexGuard<'_, Option<Vec<RevisionEntry>>> {
+        self.log_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The cached log, reading the file once when the cache is empty.
+    fn ensure_cache(&self, dir: &Dir) -> Result<Vec<RevisionEntry>> {
+        let mut cache = self.lock_log();
+        if cache.is_none() {
+            *cache = Some(Self::read_log(dir)?);
+        }
+        match cache.as_ref() {
+            Some(entries) => Ok(entries.clone()),
+            // The populate above guarantees `Some`; this arm keeps the
+            // production path panic-free if that invariant ever regresses.
+            None => Self::read_log(dir),
+        }
+    }
+
+    /// Rebuilds the cache from disk (fingerprint mismatch, tail
+    /// reconciliation failure).
+    fn rebuild_cache(&self, dir: &Dir) -> Result<Vec<RevisionEntry>> {
+        let entries = Self::read_log(dir)?;
+        *self.lock_log() = Some(entries.clone());
+        Ok(entries)
+    }
+
+    /// Reconciles the cache against the on-disk log tail before a write
+    /// (ADR-SA-001's cross-process guard): reads only the last log line,
+    /// not the whole file. A tail that cannot be read cheaply (a final line
+    /// longer than the window, or a window that starts mid-character)
+    /// reports indeterminate and falls back to the full rebuild — the disk
+    /// stays the source of truth.
+    fn reconciled_log(&self, dir: &Dir) -> Result<Vec<RevisionEntry>> {
+        let cache = self.ensure_cache(dir)?;
+        let cache_tail_id = cache.last().map(|entry| entry.id);
+        match Self::read_last_log_id(dir)? {
+            LogTail::Id(disk_tail_id) if Some(disk_tail_id) == cache_tail_id => Ok(cache),
+            _ => self.rebuild_cache(dir),
+        }
+    }
+
+    /// Reads the id of the log's last entry without scanning the file:
+    /// seeks to the tail and parses the final non-empty line. A tail that
+    /// cannot be interpreted cheaply is reported as [`LogTail::Indeterminate`]
+    /// instead of an error: every log line is a full snapshot and may exceed
+    /// the window, and the window may also start inside a multi-byte
+    /// character.
+    fn read_last_log_id(dir: &Dir) -> Result<LogTail> {
+        use std::io::{Read, Seek, SeekFrom};
+        if !dir.exists(S::LOG_NAME) {
+            return Ok(LogTail::Absent);
+        }
+        let mut file = dir.open(S::LOG_NAME)?;
+        let end = file.seek(SeekFrom::End(0))?;
+        if end == 0 {
+            return Ok(LogTail::Absent);
+        }
+        let tail_len = end.min(8_192);
+        file.seek(SeekFrom::Start(end - tail_len))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        // The window may start inside a multi-byte character; trim forward
+        // to the first UTF-8 sequence start before converting.
+        let start = if let Some(offset) = bytes
+            .iter()
+            .position(|byte| (*byte & 0b1100_0000) != 0b1000_0000)
+        {
+            offset
+        } else {
+            bytes.len()
+        };
+        let tail = match std::str::from_utf8(&bytes[start..]) {
+            Ok(tail) => tail,
+            // Not decodable text: let the full rebuild judge the file.
+            Err(_) => return Ok(LogTail::Indeterminate),
+        };
+        let Some(line) = tail.lines().rev().find(|line| !line.trim().is_empty()) else {
+            return Ok(LogTail::Absent);
+        };
+        match serde_json::from_str::<RevisionEntry>(line) {
+            Ok(entry) => Ok(LogTail::Id(entry.id)),
+            // A window-truncated final line is valid log content, not
+            // corruption; the full rebuild re-reads it whole.
+            Err(_) => Ok(LogTail::Indeterminate),
+        }
     }
 
     fn lock_dir(&self) -> MutexGuard<'_, Dir> {
@@ -159,8 +286,23 @@ impl<S: DocumentModel> MdDocumentStore<S> {
 
     fn load_impl(&self) -> Result<LoadedDoc<S>> {
         let dir = self.lock_dir();
-        let log = Self::read_log(&dir)?;
         let file = Self::read_doc(&dir)?;
+        // Fast path (ADR-SA-001): when the cached log's tail fingerprint
+        // already matches the document bytes, the cache is authoritative and
+        // the log file is not read at all. Any other combination rebuilds the
+        // cache from disk and walks the original external-edit branches.
+        let doc_fp = file.as_ref().map(|bytes| fingerprint(bytes).0);
+        let cached = self.lock_log().as_ref().cloned();
+        let cache_matches_doc = match (&file, cached.as_ref().and_then(|log| log.last())) {
+            (None, None) => true,
+            (Some(_), Some(last)) => last.fingerprint == doc_fp.unwrap_or(0),
+            _ => false,
+        };
+        let log = if cache_matches_doc {
+            cached.unwrap_or_default()
+        } else {
+            self.rebuild_cache(&dir)?
+        };
         match (file, log.last()) {
             (None, None) => Ok(LoadedDoc {
                 state: None,
@@ -195,14 +337,13 @@ impl<S: DocumentModel> MdDocumentStore<S> {
                     let fp = fingerprint(&bytes).0;
                     Self::append_log(
                         &dir,
-                        &RevisionEntry {
-                            id: 1,
-                            at: 0,
-                            kind: ChangeKind::UserExplicitEdit,
-                            note: "adopted a pre-existing document without history".into(),
-                            fingerprint: fp,
+                        &RevisionEntry::new(
+                            1,
+                            0,
+                            ChangeKind::UserExplicitEdit,
+                            "adopted a pre-existing document without history".into(),
                             bytes,
-                        },
+                        ),
                     )?;
                     Ok(LoadedDoc {
                         state: Some(state),
@@ -249,14 +390,13 @@ impl<S: DocumentModel> MdDocumentStore<S> {
                         let id = Self::next_id(&log);
                         Self::append_log(
                             &dir,
-                            &RevisionEntry {
+                            &RevisionEntry::new(
                                 id,
-                                at: 0,
-                                kind: ChangeKind::UserExplicitEdit,
-                                note: "external edit absorbed".into(),
-                                fingerprint: fp_now,
+                                0,
+                                ChangeKind::UserExplicitEdit,
+                                "external edit absorbed".into(),
                                 bytes,
-                            },
+                            ),
                         )?;
                         record!(
                             INFO,
@@ -298,20 +438,17 @@ impl<S: DocumentModel> MdDocumentStore<S> {
                 current_fp
             );
         }
-        let log = Self::read_log(&dir)?;
+        let log = self.reconciled_log(&dir)?;
         let id = Self::next_id(&log);
         Self::atomic_write(&dir, &bytes)?;
-        Self::append_log(
-            &dir,
-            &RevisionEntry {
-                id,
-                at,
-                kind,
-                note: note.to_owned(),
-                fingerprint: fp_new,
-                bytes,
-            },
-        )?;
+        let entry = RevisionEntry::new(id, at, kind, note.to_owned(), bytes);
+        Self::append_log(&dir, &entry)?;
+        // Append to the cache so the next load stays on the fast path.
+        *self.lock_log() = Some({
+            let mut log = log;
+            log.push(entry);
+            log
+        });
         record!(
             INFO,
             Event::new(module_path!(), Action::Write).with_attrs(serde_json::json!({
@@ -333,7 +470,7 @@ impl<S: DocumentModel> MdDocumentStore<S> {
         at: TimestampMs,
     ) -> Result<CommitReceipt> {
         let dir = self.lock_dir();
-        let log = Self::read_log(&dir)?;
+        let log = self.reconciled_log(&dir)?;
         let target = log
             .iter()
             .find(|entry| entry.id == to.0)
@@ -347,18 +484,22 @@ impl<S: DocumentModel> MdDocumentStore<S> {
             );
         }
         let id = Self::next_id(&log);
-        Self::atomic_write(&dir, &target.bytes)?;
-        Self::append_log(
-            &dir,
-            &RevisionEntry {
-                id,
-                at,
-                kind: ChangeKind::Rollback,
-                note: format!("rolled back to revision {}", to.0),
-                fingerprint: target.fingerprint,
-                bytes: target.bytes.clone(),
-            },
-        )?;
+        let target_bytes = target.bytes.clone();
+        let target_fingerprint = target.fingerprint;
+        Self::atomic_write(&dir, &target_bytes)?;
+        let entry = RevisionEntry::new(
+            id,
+            at,
+            ChangeKind::Rollback,
+            format!("rolled back to revision {}", to.0),
+            target_bytes,
+        );
+        Self::append_log(&dir, &entry)?;
+        *self.lock_log() = Some({
+            let mut log = log;
+            log.push(entry);
+            log
+        });
         record!(
             INFO,
             Event::new(module_path!(), Action::Write).with_attrs(serde_json::json!({
@@ -370,7 +511,7 @@ impl<S: DocumentModel> MdDocumentStore<S> {
         );
         Ok(CommitReceipt {
             revision: RevisionId(id),
-            fingerprint: Fingerprint(target.fingerprint),
+            fingerprint: Fingerprint(target_fingerprint),
         })
     }
 }
@@ -381,6 +522,14 @@ use crate::domain::selfhood::SelfState;
 impl crate::application::ports::SelfDocumentStore for MdDocumentStore<SelfState> {
     fn load(&self) -> Result<LoadedDoc<SelfState>> {
         self.load_impl()
+    }
+
+    fn revision_kinds(&self) -> Result<Vec<ChangeKind>> {
+        let dir = self.lock_dir();
+        self.reconciled_log(&dir)?
+            .iter()
+            .map(|entry| entry.kind())
+            .collect()
     }
 
     fn commit(

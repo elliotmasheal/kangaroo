@@ -116,8 +116,11 @@ impl SelfService {
         self.store.load()
     }
 
-    /// Per-turn self projection: reads the document now, no caching.
+    /// Per-turn self projection: reads the document now, no caching. The
+    /// narrative is budgeted (ADR-SA-003, 1000 chars) and carries the
+    /// time-anchor lines.
     pub fn projection(&self) -> Result<SelfProjection> {
+        const BUDGET_CHARS: usize = 1_000;
         let loaded = self.store.load()?;
         let Some(state) = loaded.state else {
             return Ok(SelfProjection {
@@ -135,6 +138,10 @@ impl SelfService {
         ));
         if is_anniversary(birthday, today) {
             narrative.push_str("- today is this individual's birthday\n");
+        }
+        if narrative.chars().count() > BUDGET_CHARS {
+            let truncated: String = narrative.chars().take(BUDGET_CHARS).collect();
+            narrative = format!("{truncated}\n- (self projection truncated to budget)");
         }
         Ok(SelfProjection {
             initialized: true,
@@ -195,13 +202,15 @@ impl SelfService {
             bail!("this individual is not initialized yet");
         };
         let events = self.negotiation_log.load_all()?;
+        self.heal_stale_proposals(&events)?;
+        let events = self.negotiation_log.load_all()?;
         if let Some(open) = open_request(&events) {
             bail!(
                 "a Given amendment request is already pending (request {}); wait for a decision or withdraw it",
                 open.id.0
             );
         }
-        let id = RequestId(events.len() as u64 + 1);
+        let id = RequestId(fold_requests(&events).len() as u64 + 1);
         let request = GivenAmendmentRequest::proposed(
             id,
             field,
@@ -314,5 +323,46 @@ impl SelfService {
     pub fn pending_given_request(&self) -> Result<Option<RequestId>> {
         let events = self.negotiation_log.load_all()?;
         Ok(open_request(&events).map(|r| r.id))
+    }
+
+    /// P4 crash-window self-heal: the accept path commits the document
+    /// before appending the Decided event, so a crash in between leaves the
+    /// request stuck `Proposed` (blocked by I-N1) while the document already
+    /// carries the negotiated revision. When the document's `negotiated`
+    /// revisions outnumber the accepted decisions, the pending request is
+    /// settled with an accepted decision event (audited, reason states the
+    /// heal).
+    fn heal_stale_proposals(&self, events: &[GivenAmendmentEvent]) -> Result<()> {
+        let Some(open) = open_request(events) else {
+            return Ok(());
+        };
+        let accepted = events
+            .iter()
+            .filter(|event| matches!(event, GivenAmendmentEvent::Decided { accepted: true, .. }))
+            .count();
+        let negotiated = self
+            .store
+            .revision_kinds()?
+            .into_iter()
+            .filter(|kind| *kind == ChangeKind::Negotiated)
+            .count();
+        if negotiated <= accepted {
+            return Ok(());
+        }
+        self.negotiation_log.append(&GivenAmendmentEvent::Decided {
+            request_id: open.id,
+            accepted: true,
+            reason: "self-healed: the document commit landed but its decision event was lost"
+                .into(),
+            at: self.clock.now_ms(),
+        })?;
+        record!(
+            WARN,
+            Event::new(module_path!(), Action::Write).with_attrs(serde_json::json!({
+                "request_id": open.id.0,
+            })),
+            "healed a negotiation decision event lost across a crash"
+        );
+        Ok(())
     }
 }

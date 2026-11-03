@@ -1,19 +1,19 @@
 //! Pure domain model: the Self aggregate, the UserProfile aggregate,
 //! Given-amendment negotiation, and self-amendment authority.
 //!
-//! No IO, no async, no zeroclaw-* dependencies — only serde for the
-//! document/event vocabulary.
+//! Zero infrastructure dependencies: no persistence, no file IO, no async
+//! runtime, no logging — only domain vocabulary and rules. Persistence DTOs
+//! live in `infra`; serialization never leaks into this layer (guarded by
+//! `tests/domain_purity.rs`).
 
 pub mod amendment;
 pub mod profile;
 pub mod selfhood;
 
-use serde::{Deserialize, Serialize};
-
 /// Why a revision was written. Shared audit vocabulary across both documents
-/// and the negotiation log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// and the negotiation log. Persistence maps these through the string forms
+/// below; the vocabulary itself stays serialization-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     /// Identity initialization (the first Given write).
     Initialize,
@@ -34,8 +34,37 @@ pub enum ChangeKind {
     DeveloperAmendment,
 }
 
+impl ChangeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::Experience => "experience",
+            Self::UserExplicitEdit => "user_explicit_edit",
+            Self::Negotiated => "negotiated",
+            Self::Rollback => "rollback",
+            Self::Recovered => "recovered",
+            Self::Amendment => "amendment",
+            Self::DeveloperAmendment => "developer_amendment",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "initialize" => Self::Initialize,
+            "experience" => Self::Experience,
+            "user_explicit_edit" => Self::UserExplicitEdit,
+            "negotiated" => Self::Negotiated,
+            "rollback" => Self::Rollback,
+            "recovered" => Self::Recovered,
+            "amendment" => Self::Amendment,
+            "developer_amendment" => Self::DeveloperAmendment,
+            _ => return None,
+        })
+    }
+}
+
 /// Monotonic revision id within one document's revision log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RevisionId(pub u64);
 
 /// Content fingerprint of one document rendering. `Fingerprint(0)` marks an
@@ -43,13 +72,14 @@ pub struct RevisionId(pub u64);
 /// negligible (64-bit). The CAS contract is in-process only — every
 /// write path starts from a fresh load, so fingerprints never cross a
 /// process restart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fingerprint(pub u64);
 
 /// Milliseconds since the Unix epoch.
 pub type TimestampMs = u64;
 
-/// A calendar date. Human-editable documents store this as `YYYY-MM-DD`.
+/// A calendar date. Human-editable documents store this as `YYYY-MM-DD`; the
+/// string form is a persistence concern owned by `infra`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DateYmd {
     pub year: i16,
@@ -141,19 +171,6 @@ impl std::fmt::Display for DateYmd {
     }
 }
 
-impl Serialize for DateYmd {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for DateYmd {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse(&raw).map_err(serde::de::Error::custom)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +210,22 @@ mod tests {
         let earlier = DateYmd::new(2026, 1, 1).expect("valid");
         let later = DateYmd::new(2027, 1, 1).expect("valid");
         assert!(earlier < later);
+    }
+
+    #[test]
+    fn change_kind_vocabulary_round_trips() {
+        for kind in [
+            ChangeKind::Initialize,
+            ChangeKind::Experience,
+            ChangeKind::UserExplicitEdit,
+            ChangeKind::Negotiated,
+            ChangeKind::Rollback,
+            ChangeKind::Recovered,
+            ChangeKind::Amendment,
+            ChangeKind::DeveloperAmendment,
+        ] {
+            assert_eq!(ChangeKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ChangeKind::parse("nonsense"), None);
     }
 }

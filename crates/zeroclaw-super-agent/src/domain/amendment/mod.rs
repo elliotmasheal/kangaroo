@@ -3,15 +3,13 @@
 //! implementations — the operation is always legal; who may trigger it is
 //! the only variable (design doc §3.3.1).
 
-use serde::{Deserialize, Serialize};
-
 use crate::domain::ChangeKind;
 use crate::domain::selfhood::EarnedPatch;
 
 /// Evidence that an amendment came from experience (I-S2). Free-form notes
 /// for M1; structured event references arrive with the Experience wiring in
 /// M2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExperienceRef {
     pub note: String,
 }
@@ -22,7 +20,7 @@ pub const MAX_PATCHES_PER_AMENDMENT: usize = 8;
 /// An Earned-only amendment request. Type-level guarantee: no field can
 /// express a change to `GivenFacts` — Given changes go through negotiation
 /// (§3.3.2), never through `SelfAmendment`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmendmentRequest {
     pub patches: Vec<EarnedPatch>,
     pub evidence: Vec<ExperienceRef>,

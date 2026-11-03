@@ -302,18 +302,18 @@ fn pending_request_blocks_proposals_until_withdrawn() -> Result<()> {
     service.initialize(init_input())?;
 
     // Simulate a crash between the Proposed event and its decision: append
-    // a proposal with no matching Decided event.
-    let request = GivenAmendmentRequest::proposed(
-        RequestId(1),
-        GivenField::Name,
-        GivenValue::Name("Vega".into()),
-        "crash mid-negotiation".into(),
-        1,
-    );
-    std::fs::write(
-        root.join("given_negotiation.jsonl"),
-        serde_json::to_string(&GivenAmendmentEvent::Proposed { request })? + "\n",
-    )?;
+    // the proposal through the real writer, with no matching Decided event.
+    // The log line is produced by the store's own serialization, so the file
+    // is valid by construction.
+    infra::jsonl_negotiation_log(root)?.append(&GivenAmendmentEvent::Proposed {
+        request: GivenAmendmentRequest::proposed(
+            RequestId(1),
+            GivenField::Name,
+            GivenValue::Name("Vega".into()),
+            "crash mid-negotiation".into(),
+            1,
+        ),
+    })?;
     assert!(service.pending_given_request()?.is_some());
 
     let error = service
@@ -332,6 +332,47 @@ fn pending_request_blocks_proposals_until_withdrawn() -> Result<()> {
     let outcome =
         service.propose_given_change(GivenField::Name, GivenValue::Name("Vega".into()), "retry")?;
     assert!(outcome.accepted);
+    Ok(())
+}
+
+#[test]
+fn request_ids_count_requests_not_log_events() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let root = tmp.path();
+    let service = self_service(root);
+    service.initialize(init_input())?;
+
+    let first = service.propose_given_change(
+        GivenField::Name,
+        GivenValue::Name("Vega".into()),
+        "the user prefers it".to_owned(),
+    )?;
+    assert!(first.accepted);
+    assert_eq!(first.request_id, RequestId(1));
+
+    // Simulate the crash window: a proposal whose decision event was lost
+    // stays open. Withdrawing it appends an event but creates no request.
+    infra::jsonl_negotiation_log(root)?.append(&GivenAmendmentEvent::Proposed {
+        request: GivenAmendmentRequest::proposed(
+            RequestId(2),
+            GivenField::Name,
+            GivenValue::Name("Nova".into()),
+            "crash mid-negotiation".into(),
+            1,
+        ),
+    })?;
+    assert_eq!(service.pending_given_request()?, Some(RequestId(2)));
+    assert!(service.withdraw_given_request(RequestId(2))?);
+
+    // The next id counts folded requests, not log lines: the withdrawn
+    // request must not make it skip to 5.
+    let third = service.propose_given_change(
+        GivenField::Name,
+        GivenValue::Name("Nova".into()),
+        "the user prefers it".to_owned(),
+    )?;
+    assert!(third.accepted);
+    assert_eq!(third.request_id, RequestId(3));
     Ok(())
 }
 
@@ -414,10 +455,10 @@ fn cross_subject_writes_stay_isolated() -> Result<()> {
     let self_before = read_doc(root, "self.md");
 
     // Profile writes never touch the Self document (I-X2).
-    let outcomes = agent
+    let plan = agent
         .profile_service()
         .observe_batch(&[fact_observation("editor", "Neovim")])?;
-    assert!(matches!(outcomes[0].decision, RecordDecision::Record));
+    assert!(matches!(plan.outcomes[0].decision, RecordDecision::Record));
     assert_eq!(read_doc(root, "self.md"), self_before);
 
     // Self amendments never touch the profile document.
@@ -451,17 +492,20 @@ fn profile_budget_splits_record_from_needs_review() -> Result<()> {
         .iter()
         .map(|key| fact_observation(key, "value"))
         .collect();
-    let outcomes = service.observe_batch(&observations)?;
-    let recorded = outcomes
+    let plan = service.observe_batch(&observations)?;
+    let recorded = plan
+        .outcomes
         .iter()
         .filter(|o| matches!(o.decision, RecordDecision::Record))
         .count();
-    let needs_review = outcomes
+    let needs_review = plan
+        .outcomes
         .iter()
         .filter(|o| matches!(o.decision, RecordDecision::NeedsReview))
         .count();
     assert_eq!(recorded, 3, "per-turn budget");
     assert_eq!(needs_review, 2);
+    assert_eq!(plan.patches.len(), 3);
     let state = service.current()?.state.expect("present");
     assert_eq!(state.fact_count(), 3);
     Ok(())
@@ -471,7 +515,7 @@ fn profile_budget_splits_record_from_needs_review() -> Result<()> {
 fn credentials_never_reach_the_profile() -> Result<()> {
     let tmp = TempDir::new()?;
     let service = profile_service(tmp.path());
-    let outcomes = service.observe_batch(&[Observation {
+    let plan = service.observe_batch(&[Observation {
         section: SectionKind::Environment,
         key: "api_key".into(),
         value: "sk-abcdef1234567890".into(),
@@ -479,7 +523,7 @@ fn credentials_never_reach_the_profile() -> Result<()> {
         confidence: 100,
     }])?;
     assert!(matches!(
-        outcomes[0].decision,
+        plan.outcomes[0].decision,
         RecordDecision::Ignore {
             reason: IgnoreReason::CredentialLike
         }

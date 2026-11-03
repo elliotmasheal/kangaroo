@@ -4,7 +4,6 @@
 
 pub mod negotiation;
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::domain::{DateYmd, TimestampMs};
@@ -27,9 +26,9 @@ pub const STYLE_MAX_CHARS: usize = 512;
 pub const BIRTHDAY_EARLIEST_YEAR: i16 = 1900;
 
 /// The gender named at initialization. More values may only arrive through a
-/// schema change, not through free text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// schema change, not through free text. The string forms are persistence
+/// vocabulary owned by `infra`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gender {
     Female,
     Male,
@@ -37,10 +36,31 @@ pub enum Gender {
     Undisclosed,
 }
 
+impl Gender {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Female => "female",
+            Self::Male => "male",
+            Self::NonBinary => "non-binary",
+            Self::Undisclosed => "undisclosed",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "female" => Self::Female,
+            "male" => Self::Male,
+            "non-binary" => Self::NonBinary,
+            "undisclosed" => Self::Undisclosed,
+            _ => return None,
+        })
+    }
+}
+
 /// Facts given at initialization. Invariant I-S1: written once by the
 /// initialization use case, afterwards only negotiable (never writable by the
 /// agent, never directly editable by the user).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GivenFacts {
     pub name: String,
     pub birthday: DateYmd,
@@ -122,7 +142,7 @@ pub fn valid_trait_kind(kind: &str) -> Result<(), String> {
 }
 
 /// One earned trait with its current strength and evidence volume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EarnedTrait {
     pub kind: String,
     pub strength: u8,
@@ -131,13 +151,13 @@ pub struct EarnedTrait {
 
 /// Earned characteristics. Kept sorted by `kind` so document renders stay
 /// diffable across commits.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EarnedProfile {
     pub traits: Vec<EarnedTrait>,
 }
 
 /// Pending solidification counter for one trait kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationCounter {
     pub count: u32,
     pub last_seen: TimestampMs,
@@ -145,8 +165,7 @@ pub struct ObservationCounter {
 
 /// A patch to the Earned profile submitted through `SelfAmendment`.
 /// Type-level guarantee: no variant can touch `GivenFacts` (I-S1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EarnedPatch {
     SetTrait { kind: String, strength: u8 },
     RemoveTrait { kind: String },
@@ -162,7 +181,7 @@ pub enum ExperienceOutcome {
 
 /// The Self aggregate: given facts, earned traits, and pending
 /// solidification counters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfState {
     pub given: GivenFacts,
     pub earned: EarnedProfile,
@@ -217,9 +236,7 @@ impl SelfState {
                 kind: kind.to_owned(),
             })
         } else {
-            Ok(ExperienceOutcome::Counting {
-                count: counter.count,
-            })
+            Ok(ExperienceOutcome::Counting { count })
         }
     }
 
@@ -272,18 +289,35 @@ impl SelfState {
         let mut out = String::new();
         out.push_str(&format!("# {}\n\n", self.given.name));
         out.push_str(&format!("- birthday: {}\n", self.given.birthday));
-        out.push_str(&format!("- gender: {:?}\n", self.given.gender));
+        out.push_str(&format!("- gender: {}\n", self.given.gender.as_str()));
         out.push_str(&format!("- initial style: {}\n", self.given.initial_style));
         if !self.earned.traits.is_empty() {
             out.push_str("\n## Earned traits\n\n");
             for trait_ in &self.earned.traits {
                 out.push_str(&format!(
-                    "- {} (strength {}, {} observations)\n",
-                    trait_.kind, trait_.strength, trait_.evidence_count
+                    "- {}: {} (strength {}, {} observations)\n",
+                    trait_.kind,
+                    trait_gloss(&trait_.kind),
+                    trait_.strength,
+                    trait_.evidence_count
                 ));
             }
         }
         out
+    }
+}
+
+/// Natural-language gloss for an Earned trait (ADR-SA-003): describes how the
+/// trait manifests, so a projection line carries behavioral meaning for the
+/// model instead of a bare strength number. Known kinds get curated glosses;
+/// unknown kinds get a generic manifestation sentence.
+pub fn trait_gloss(kind: &str) -> String {
+    match kind {
+        "patience" => "stays calm through repeated setbacks and corrections".into(),
+        "curiosity" => "asks follow-up questions and digs into unfamiliar topics".into(),
+        "directness" => "prefers short, plain answers over hedging".into(),
+        "thoroughness" => "checks work twice and explains trade-offs before acting".into(),
+        _ => format!("shows up consistently across recent interactions (as {kind})"),
     }
 }
 
@@ -345,6 +379,19 @@ mod tests {
         assert!(valid_trait_kind("Patience").is_err());
         assert!(valid_trait_kind("has space").is_err());
         assert!(valid_trait_kind(&"x".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn gender_vocabulary_round_trips() {
+        for gender in [
+            Gender::Female,
+            Gender::Male,
+            Gender::NonBinary,
+            Gender::Undisclosed,
+        ] {
+            assert_eq!(Gender::parse(gender.as_str()), Some(gender));
+        }
+        assert_eq!(Gender::parse("nonsense"), None);
     }
 
     #[test]

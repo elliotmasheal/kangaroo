@@ -1,5 +1,6 @@
 //! Infrastructure: document stores, negotiation log, clock, and the
-//! isolation-guarded default paths.
+//! isolation-guarded default paths. All persistence maps pure domain types
+//! through infra-owned serialization DTOs; domain never carries serde.
 
 pub mod clock;
 pub mod doc_store;

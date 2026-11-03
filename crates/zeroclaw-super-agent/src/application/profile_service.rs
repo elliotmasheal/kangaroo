@@ -1,19 +1,19 @@
-//! UserProfile use cases: observation intake behind the update criterion,
-//! per-turn projection, and rollback.
+//! UserProfile use cases: observation intake, per-turn projection, and
+//! rollback. The application layer only orchestrates — the update criterion,
+//! the per-turn budget, and the provenance mapping are domain rules that
+//! live on the aggregate (`UserProfile::plan_recording`).
 
 use anyhow::Result;
 use std::sync::Arc;
 use zeroclaw_log::{Action, Event, record};
 
 use crate::application::ports::{Clock, CommitReceipt, LoadedDoc, ProfileDocumentStore};
-use crate::domain::profile::{
-    FactPatch, Observation, ObservationKind, PatchAction, RecordDecision, SectionKind, UserProfile,
-    WorthRecording,
-};
+use crate::domain::profile::{RecordingPlan, SectionKind, UserProfile};
 use crate::domain::{ChangeKind, RevisionId};
 
-/// Per-turn update budget (invariant I-U5): observations beyond this count
-/// that would otherwise be recorded become `NeedsReview` instead.
+/// Per-turn update budget (invariant I-U5). The budget is a policy input the
+/// application passes into the aggregate's planning; the rule itself is
+/// enforced by `UserProfile::plan_recording`.
 pub const MAX_PROFILE_UPDATES_PER_TURN: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,28 +23,16 @@ pub struct ProfileProjection {
     pub context: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservationOutcome {
-    pub section: SectionKind,
-    pub key: String,
-    pub decision: RecordDecision,
-}
-
 /// UserProfile use cases. Writes go through the profile store only; the Self
 /// document is never touched from here (I-X1).
 pub struct ProfileService {
     store: Arc<dyn ProfileDocumentStore>,
     clock: Arc<dyn Clock>,
-    policy: WorthRecording,
 }
 
 impl ProfileService {
     pub fn new(store: Arc<dyn ProfileDocumentStore>, clock: Arc<dyn Clock>) -> Self {
-        Self {
-            store,
-            clock,
-            policy: WorthRecording,
-        }
+        Self { store, clock }
     }
 
     /// Fresh load; surfaces external-edit handling (the user's hand edit is
@@ -53,65 +41,54 @@ impl ProfileService {
         self.store.load()
     }
 
-    /// Applies the update criterion to a batch of observations and commits
-    /// the recorded ones as one revision. Budget: at most
-    /// `MAX_PROFILE_UPDATES_PER_TURN` recorded observations per call;
-    /// overflow becomes `NeedsReview` (kept as observation, not written).
-    pub fn observe_batch(&self, observations: &[Observation]) -> Result<Vec<ObservationOutcome>> {
+    /// Applies the aggregate's recording plan to a batch of observations and
+    /// commits the planned patches as one revision. The commit note records
+    /// every displaced fact (ADR-SA-002 §3: 失效而非删除).
+    pub fn observe_batch(
+        &self,
+        observations: &[crate::domain::profile::Observation],
+    ) -> Result<RecordingPlan> {
         let loaded = self.store.load()?;
         let mut state = loaded.state.clone().unwrap_or_default();
-        let mut patches: Vec<FactPatch> = Vec::new();
-        let mut outcomes = Vec::with_capacity(observations.len());
-        for observation in observations {
-            let existing = state.fact(observation.section, &observation.key).cloned();
-            let decision = self.policy.decide(observation, existing.as_ref());
-            let decision = match decision {
-                RecordDecision::Record if patches.len() >= MAX_PROFILE_UPDATES_PER_TURN => {
-                    RecordDecision::NeedsReview
-                }
-                other => other,
+        let now = self.clock.now_ms();
+        let plan = state.plan_recording(observations, MAX_PROFILE_UPDATES_PER_TURN, now);
+        if !plan.patches.is_empty() {
+            state.apply_patches(&plan.patches, now);
+            let note = if plan.overrides.is_empty() {
+                "profile observations recorded".to_owned()
+            } else {
+                format!(
+                    "profile observations recorded; superseded: {}",
+                    plan.overrides.join("; ")
+                )
             };
-            if let RecordDecision::Record = decision {
-                patches.push(FactPatch {
-                    section: observation.section,
-                    key: observation.key.clone(),
-                    action: PatchAction::Upsert {
-                        value: observation.value.clone(),
-                        source: source_for(observation),
-                    },
-                });
-            }
-            outcomes.push(ObservationOutcome {
-                section: observation.section,
-                key: observation.key.clone(),
-                decision,
-            });
-        }
-        if !patches.is_empty() {
-            for patch in &patches {
-                state.apply_patch(patch, self.clock.now_ms());
-            }
             let receipt = self.store.commit(
                 loaded.fingerprint,
                 &state,
                 ChangeKind::Experience,
-                "profile observations recorded",
-                self.clock.now_ms(),
+                &note,
+                now,
             )?;
             record!(
                 INFO,
                 Event::new(module_path!(), Action::Write).with_attrs(serde_json::json!({
                     "revision": receipt.revision.0,
-                    "facts": patches.len(),
+                    "facts": plan.patches.len(),
+                    "superseded": plan.overrides.len(),
                 })),
                 "profile facts committed from observations"
             );
         }
-        Ok(outcomes)
+        Ok(plan)
     }
 
     /// Per-turn profile projection: reads the document now, no caching.
+    /// Rendering is budgeted (ADR-SA-003): sections fill in the truncation
+    /// order `Corrections > Identity > Preferences > Goals > Environment`,
+    /// within a section the newest facts come first, and facts that do not
+    /// fit are counted into the audit log instead of being silently dropped.
     pub fn projection(&self) -> Result<ProfileProjection> {
+        const BUDGET_CHARS: usize = 2_000;
         let loaded = self.store.load()?;
         let Some(state) = loaded.state else {
             return Ok(ProfileProjection {
@@ -119,25 +96,57 @@ impl ProfileService {
                 context: String::new(),
             });
         };
+        let order = [
+            SectionKind::Corrections,
+            SectionKind::Identity,
+            SectionKind::Preferences,
+            SectionKind::Goals,
+            SectionKind::Environment,
+        ];
         let mut context = String::new();
-        for (kind, title) in [
-            (SectionKind::Identity, "Identity"),
-            (SectionKind::Environment, "Environment"),
-            (SectionKind::Preferences, "Preferences"),
-            (SectionKind::Goals, "Goals"),
-            (SectionKind::Corrections, "Corrections"),
-        ] {
-            let facts = state.section(kind);
+        let mut budget = BUDGET_CHARS;
+        let mut omitted = 0usize;
+        for kind in order {
+            let mut facts: Vec<(&String, &crate::domain::profile::ProfileFact)> =
+                state.section(kind).iter().collect();
+            facts.sort_by_key(|(_, fact)| std::cmp::Reverse(fact.updated_at));
             if facts.is_empty() {
                 continue;
             }
-            context.push_str(&format!("\n## {title}\n"));
+            let section_header = format!("\n## {}\n", kind.title());
+            if section_header.len() > budget {
+                omitted += facts.len();
+                continue;
+            }
+            context.push_str(&section_header);
+            budget -= section_header.len();
             for (key, fact) in facts {
-                context.push_str(&format!("- {key}: {}\n", fact.value));
+                let line = format!("- {key}: {}\n", fact.value);
+                if line.len() > budget {
+                    omitted += 1;
+                    continue;
+                }
+                context.push_str(&line);
+                budget -= line.len();
             }
         }
         if !state.notes.trim().is_empty() {
-            context.push_str(&format!("\n## Notes (user's own)\n{}\n", state.notes));
+            let notes = format!("\n## Notes (user's own)\n{}\n", state.notes);
+            if notes.len() <= budget {
+                context.push_str(&notes);
+            } else {
+                omitted += 1;
+            }
+        }
+        if omitted > 0 {
+            record!(
+                INFO,
+                Event::new(module_path!(), Action::Skip).with_attrs(serde_json::json!({
+                    "omitted": omitted,
+                    "budget_chars": BUDGET_CHARS,
+                })),
+                "profile projection truncated to the context budget"
+            );
         }
         Ok(ProfileProjection {
             fact_count: state.fact_count(),
@@ -161,16 +170,5 @@ impl ProfileService {
             "user profile rolled back"
         );
         Ok(receipt)
-    }
-}
-
-fn source_for(observation: &Observation) -> crate::domain::profile::ChangeSource {
-    match observation.kind {
-        ObservationKind::Correction => {
-            crate::domain::profile::ChangeSource::UserConversationCorrection
-        }
-        _ => crate::domain::profile::ChangeSource::AgentInference {
-            confidence: observation.confidence,
-        },
     }
 }

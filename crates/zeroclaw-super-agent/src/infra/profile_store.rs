@@ -1,21 +1,97 @@
 //! The UserProfile document model: TOML front matter for the five fact
 //! sections; the body is the user's own notes, preserved verbatim on every
 //! rewrite. This is the one document a user may hand-edit (I-U2).
+//! Serialization lives here in infra-owned DTOs; the domain aggregate stays
+//! serialization-free.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use crate::domain::profile::{SectionFacts, UserProfile};
+use crate::domain::profile::{ChangeSource, ProfileFact, SectionFacts, SectionKind, UserProfile};
 use crate::infra::doc_store::DocumentModel;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProfileFrontMatter {
     schema: u32,
-    identity: SectionFacts,
-    environment: SectionFacts,
-    preferences: SectionFacts,
-    goals: SectionFacts,
-    corrections: SectionFacts,
+    identity: BTreeMap<String, FactDto>,
+    environment: BTreeMap<String, FactDto>,
+    preferences: BTreeMap<String, FactDto>,
+    goals: BTreeMap<String, FactDto>,
+    corrections: BTreeMap<String, FactDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FactDto {
+    value: String,
+    source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confidence: Option<u8>,
+    updated_at: u64,
+}
+
+fn section_to_dto(section: &SectionFacts) -> BTreeMap<String, FactDto> {
+    section
+        .iter()
+        .map(|(key, fact)| {
+            (
+                key.clone(),
+                FactDto {
+                    value: fact.value.clone(),
+                    source: fact.source.kind().to_owned(),
+                    confidence: fact.source.confidence(),
+                    updated_at: fact.updated_at,
+                },
+            )
+        })
+        .collect()
+}
+
+fn section_from_dto(raw: BTreeMap<String, FactDto>, section: SectionKind) -> Result<SectionFacts> {
+    raw.into_iter()
+        .map(|(key, dto)| {
+            let source =
+                ChangeSource::from_parts(&dto.source, dto.confidence).map_err(|reason| {
+                    anyhow::Error::msg(format!("{}/{key}: {reason}", section.as_str()))
+                })?;
+            Ok((
+                key,
+                ProfileFact {
+                    value: dto.value,
+                    source,
+                    updated_at: dto.updated_at,
+                },
+            ))
+        })
+        .collect()
+}
+
+impl From<&UserProfile> for ProfileFrontMatter {
+    fn from(profile: &UserProfile) -> Self {
+        Self {
+            schema: UserProfile::SCHEMA_VERSION,
+            identity: section_to_dto(&profile.identity),
+            environment: section_to_dto(&profile.environment),
+            preferences: section_to_dto(&profile.preferences),
+            goals: section_to_dto(&profile.goals),
+            corrections: section_to_dto(&profile.corrections),
+        }
+    }
+}
+
+impl TryFrom<ProfileFrontMatter> for UserProfile {
+    type Error = anyhow::Error;
+
+    fn try_from(front: ProfileFrontMatter) -> Result<Self> {
+        Ok(Self {
+            identity: section_from_dto(front.identity, SectionKind::Identity)?,
+            environment: section_from_dto(front.environment, SectionKind::Environment)?,
+            preferences: section_from_dto(front.preferences, SectionKind::Preferences)?,
+            goals: section_from_dto(front.goals, SectionKind::Goals)?,
+            corrections: section_from_dto(front.corrections, SectionKind::Corrections)?,
+            notes: String::new(),
+        })
+    }
 }
 
 impl DocumentModel for UserProfile {
@@ -24,15 +100,7 @@ impl DocumentModel for UserProfile {
     const LOG_NAME: &'static str = "user_profile.revisions.jsonl";
 
     fn front_matter(&self) -> Result<String> {
-        let front = ProfileFrontMatter {
-            schema: Self::SCHEMA_VERSION,
-            identity: self.identity.clone(),
-            environment: self.environment.clone(),
-            preferences: self.preferences.clone(),
-            goals: self.goals.clone(),
-            corrections: self.corrections.clone(),
-        };
-        Ok(toml::to_string(&front)?)
+        Ok(toml::to_string(&ProfileFrontMatter::from(self))?)
     }
 
     fn from_parts(front_matter: &str, body: &str) -> Result<Self> {
@@ -45,14 +113,9 @@ impl DocumentModel for UserProfile {
                 Self::SCHEMA_VERSION
             );
         }
-        Ok(Self {
-            identity: front.identity,
-            environment: front.environment,
-            preferences: front.preferences,
-            goals: front.goals,
-            corrections: front.corrections,
-            notes: body.to_owned(),
-        })
+        let mut profile = UserProfile::try_from(front)?;
+        profile.notes = body.to_owned();
+        Ok(profile)
     }
 
     fn body(&self) -> String {
@@ -60,8 +123,6 @@ impl DocumentModel for UserProfile {
     }
 }
 
-// A fact's front-matter shape ([identity] tables with inline
-// `value/source/updated_at` entries) is owned by ProfileFact's serde derive.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +152,18 @@ mod tests {
     fn unknown_schema_is_rejected() {
         let raw = format!("schema = {}\n", UserProfile::SCHEMA_VERSION + 1);
         assert!(<UserProfile as DocumentModel>::from_parts(&raw, "").is_err());
+    }
+
+    #[test]
+    fn inference_without_confidence_is_rejected() {
+        let raw = "[preferences]\neditor = { value = \"x\", source = \"agent-inference\", updated_at = 1 }\n";
+        assert!(<UserProfile as DocumentModel>::from_parts(raw, "").is_err());
+    }
+
+    #[test]
+    fn unknown_source_kind_is_rejected() {
+        let raw =
+            "[preferences]\neditor = { value = \"x\", source = \"nonsense\", updated_at = 1 }\n";
+        assert!(<UserProfile as DocumentModel>::from_parts(raw, "").is_err());
     }
 }

@@ -14529,12 +14529,18 @@ name = "zeroclaw-super-agent"
 version = "0.8.7"
 dependencies = [
  "anyhow",
+ "async-trait",
  "cap-std",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "zeroclaw-api",
+ "zeroclaw-config",
+ "zeroclaw-eval",
  "zeroclaw-log",
+ "zeroclaw-memory",
  "zeroclaw-runtime",
 ]
 

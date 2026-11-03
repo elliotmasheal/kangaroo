@@ -3,18 +3,16 @@
 //! individual decides and may reject, and every step is recorded with a
 //! reason.
 
-use serde::{Deserialize, Serialize};
-
 use super::{Gender, GivenFacts};
 use crate::domain::{DateYmd, TimestampMs};
 
 /// Monotonic request id within one negotiation log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
-/// Which Given fact a request targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// Which Given fact a request targets. String forms are persistence
+/// vocabulary owned by `infra`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GivenField {
     Name,
     Birthday,
@@ -22,8 +20,29 @@ pub enum GivenField {
     InitialStyle,
 }
 
+impl GivenField {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Birthday => "birthday",
+            Self::Gender => "gender",
+            Self::InitialStyle => "initial-style",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "name" => Self::Name,
+            "birthday" => Self::Birthday,
+            "gender" => Self::Gender,
+            "initial-style" => Self::InitialStyle,
+            _ => return None,
+        })
+    }
+}
+
 /// A proposed value; the variant must match the field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GivenValue {
     Name(String),
     Birthday(DateYmd),
@@ -33,7 +52,7 @@ pub enum GivenValue {
 
 /// The individual's decision on one request. Decisions always carry a reason
 /// (I-N2), including rejections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub accepted: bool,
     pub reason: String,
@@ -42,7 +61,7 @@ pub struct Decision {
 
 /// One negotiation request. Status is derived: `decision == None &&
 /// withdrawn_at == None` means still open.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GivenAmendmentRequest {
     pub id: RequestId,
     pub field: GivenField,
@@ -75,18 +94,7 @@ impl GivenAmendmentRequest {
     pub fn is_open(&self) -> bool {
         self.decision.is_none() && self.withdrawn_at.is_none()
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestStatus {
-    Proposed,
-    Accepted,
-    Rejected,
-    Withdrawn,
-}
-
-impl GivenAmendmentRequest {
     pub fn status(&self) -> RequestStatus {
         if let Some(decision) = &self.decision {
             if decision.accepted {
@@ -102,10 +110,18 @@ impl GivenAmendmentRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestStatus {
+    Proposed,
+    Accepted,
+    Rejected,
+    Withdrawn,
+}
+
 /// Append-only event log vocabulary. State is the fold of these events
 /// (I-N4); the log is separate from the document revision log, so a rejected
 /// or withdrawn negotiation produces no document revision (I-N3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GivenAmendmentEvent {
     Proposed {
         request: GivenAmendmentRequest,
@@ -224,7 +240,6 @@ impl NegotiationPolicy for ValidationPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::selfhood::Gender;
 
     fn facts() -> GivenFacts {
         GivenFacts {
@@ -259,6 +274,19 @@ mod tests {
             at: 30,
         });
         assert_eq!(r.status(), RequestStatus::Accepted);
+    }
+
+    #[test]
+    fn field_vocabulary_round_trips() {
+        for field in [
+            GivenField::Name,
+            GivenField::Birthday,
+            GivenField::Gender,
+            GivenField::InitialStyle,
+        ] {
+            assert_eq!(GivenField::parse(field.as_str()), Some(field));
+        }
+        assert_eq!(GivenField::parse("nonsense"), None);
     }
 
     #[test]

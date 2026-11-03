@@ -53,6 +53,9 @@ pub trait SelfDocumentStore: Send + Sync {
         to: RevisionId,
         at: TimestampMs,
     ) -> Result<CommitReceipt>;
+    /// The ChangeKind of every revision in the log, in id order. Used by the
+    /// negotiation self-heal to detect a lost decision event (P4 window).
+    fn revision_kinds(&self) -> Result<Vec<ChangeKind>>;
 }
 
 /// Store port for the UserProfile document (invariants I-U1/I-U2).
