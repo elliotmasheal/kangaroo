@@ -14525,6 +14525,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-super-agent"
+version = "0.8.7"
+dependencies = [
+ "anyhow",
+ "cap-std",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "zeroclaw-log",
+ "zeroclaw-runtime",
+]
+
+[[package]]
 name = "zeroclaw-tls"
 version = "0.8.7"
 dependencies = [

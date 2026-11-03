@@ -1,0 +1,29 @@
+[package]
+name = "zeroclaw-super-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Independent-agent domain layer: Self and UserProfile cognition documents, Given-amendment negotiation, and self-amendment authority."
+publish = false
+
+[features]
+default = []
+# Compile-time gate for the developer self-amendment authority. Release builds
+# never contain DeveloperAuthority or its entry points; see the design doc
+# section on the double gate (compile-time feature + runtime switch).
+dev-self-amendment = []
+
+[dependencies]
+# composition types only (RuntimeCapabilities capability sources); no runtime
+# code is consumed or modified.
+zeroclaw-runtime.workspace = true
+zeroclaw-log.workspace = true
+anyhow = "1.0"
+cap-std = "4"
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+toml = "1.0"
+
+[dev-dependencies]
+tempfile = "3.26"
