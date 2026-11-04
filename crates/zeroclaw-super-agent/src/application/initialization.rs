@@ -1,5 +1,5 @@
 //! The stable identity-initialization contract (adapter-agnostic). An outer
-//! interaction adapter (questionnaire today, something else tomorrow)
+//! interaction adapter (an intake flow today, something else tomorrow)
 //! assembles an [`InitializationDraft`]; the core validates it and commits
 //! once, atomically. The core never sees questions, question ids, progress,
 //! not-disclosed sentinels, wording, or sessions — those belong to the
