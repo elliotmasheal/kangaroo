@@ -1727,3 +1727,15 @@ turn-repeated-success-advisory = The same tool call returned the same successful
 turn-repeated-failure-recovery = The same tool call failed with the same result repeatedly. Change the approach or explain the blocker. One further identical retry is available before this turn stops.
 turn-repeated-failure-exhausted = The recovery retry failed with the same result, so this turn has stopped. Completed tool results have been preserved. You can retry in a new turn.
 turn-repeated-failure-retry-skipped = Skipped an additional identical call in this recovery batch. Only one recovery retry is available.
+
+cli-kangaroo-starting = Kangaroo starting. data dir: {$data_dir}; gateway port: {$port}
+cli-intake-opening = First meeting. I need a few facts to know who I am; answer each one, or press Enter on an optional one to leave it undisclosed.
+cli-intake-q-name = What should my name be?
+cli-intake-q-birthday = What is my birthday? (YYYY-MM-DD; I count my existence from it)
+cli-intake-q-gender = My gender? (female / male / non-binary / undisclosed)
+cli-intake-q-style = How should I talk at the start?
+cli-intake-q-assumption = Anything about how you prefer to be worked with that I should treat as a starting assumption?
+cli-intake-abandoned = Intake abandoned; nothing was written. Run me again to start over.
+cli-intake-required = This one is required - I cannot start without it.
+cli-intake-done = Identity initialized (revision {$revision}). Hello - I can talk now.
+cli-kangaroo-chat-ready = Chat ready. Type a message; :quit exits.

@@ -16,3 +16,33 @@ pub mod application;
 pub mod domain;
 pub mod infra;
 pub mod tools;
+
+/// One real agent turn with the dual projection and profile tools wired in:
+/// the runtime's capability-driven entry point, called with the product's
+/// generation snapshot and the projection memory adapter supplied through
+/// `AgentRunOverrides`. This is the M2 hookup seam — no runtime file changes.
+pub async fn begin_turn_turn(
+    config: zeroclaw_config::schema::Config,
+    capabilities: zeroclaw_runtime::composition::RuntimeCapabilities,
+    agent_alias: &str,
+    message: String,
+    overrides: zeroclaw_runtime::agent::loop_::AgentRunOverrides,
+) -> anyhow::Result<String> {
+    zeroclaw_runtime::agent::run_with_capabilities(
+        config,
+        capabilities,
+        None,
+        agent_alias,
+        Some(message),
+        None,
+        None,
+        None,
+        vec![],
+        true,
+        None,
+        None,
+        zeroclaw_api::ingress::TurnOrigin::Interactive,
+        overrides,
+    )
+    .await
+}

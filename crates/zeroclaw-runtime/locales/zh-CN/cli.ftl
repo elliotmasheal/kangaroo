@@ -1362,3 +1362,15 @@ tool-git-operations-error-docker-runtime-write-unsupported = Git 写入命令在
 
 turn-context-window-exceeded-error = 本次请求超过所选模型的上下文容量。请减少请求内容或启用的工具，或选择上下文容量更大的模型。
 cron-agent-job-failed = 定时任务未能完成，请重试或联系管理员查看日志。
+
+cli-kangaroo-starting = 袋鼠启动中。数据目录：{$data_dir}；网关端口：{$port}
+cli-intake-opening = 第一次见面。我需要几个事实才知道自己是谁；逐题回答，可选题直接回车表示不告知。
+cli-intake-q-name = 我的名字叫什么？
+cli-intake-q-birthday = 我的生日是哪天？（YYYY-MM-DD；我的存在时长由此起算）
+cli-intake-q-gender = 我的性别？（female / male / non-binary / undisclosed）
+cli-intake-q-style = 一开始我该怎么说话？
+cli-intake-q-assumption = 有没有你希望我当作初始假设的相处偏好？
+cli-intake-abandoned = 访谈已放弃；未写入任何内容。再次运行即可从头开始。
+cli-intake-required = 这一题必答——没有它我无法完成初始化。
+cli-intake-done = 身份初始化完成（修订 {$revision}）。你好，我可以开始说话了。
+cli-kangaroo-chat-ready = 对话就绪。输入消息即可；:quit 退出。

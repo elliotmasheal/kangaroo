@@ -2,6 +2,7 @@
 //! ports ([`ports`]). The turn entry point and the capability-generation
 //! handle live in [`super_agent_app`].
 
+pub mod initialization;
 pub mod ports;
 pub mod profile_service;
 pub mod self_service;

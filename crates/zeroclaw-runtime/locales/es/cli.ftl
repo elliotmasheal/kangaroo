@@ -1360,3 +1360,15 @@ channel-approval-opt-allow-always = Permitir siempre
 channel-approval-opt-reject = Rechazar
 channel-approval-opt-reject-with-edit = Rechazar con edición
 tool-git-operations-error-docker-runtime-write-unsupported = Los comandos de escritura de Git no están disponibles con el entorno de ejecución Docker porque no pueden confinarse a su contenedor.
+
+cli-kangaroo-starting = Kangaroo iniciando. directorio de datos: {$data_dir}; puerto de pasarela: {$port}
+cli-intake-opening = Primera vez. Necesito algunos hechos para saber quien soy; responde pregunta por pregunta, Enter en una opcional la deja sin declarar.
+cli-intake-q-name = ¿Como me llamo?
+cli-intake-q-birthday = ¿Cual es mi cumpleanos? (AAAA-MM-DD; de ahi cuento mi existencia)
+cli-intake-q-gender = ¿Mi genero? (female / male / non-binary / undisclosed)
+cli-intake-q-style = ¿Como hablo al principio?
+cli-intake-q-assumption = ¿Alguna preferencia de trato que deba tomar como suposicion inicial?
+cli-intake-abandoned = Entrevista abandonada; no se escribio nada. Ejecutame de nuevo para empezar de cero.
+cli-intake-required = Esta pregunta es obligatoria: no puedo inicializarme sin ella.
+cli-intake-done = Identidad inicializada (revision {$revision}). Hola, ya puedo hablar.
+cli-kangaroo-chat-ready = Conversacion lista. Escribe un mensaje; :quit para salir.

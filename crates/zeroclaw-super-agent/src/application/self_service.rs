@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use std::sync::Arc;
 use zeroclaw_log::{Action, Event, record};
 
+use crate::application::initialization::InitializationDraft;
 use crate::application::ports::{Clock, LoadedDoc, NegotiationEventLog, SelfDocumentStore};
 use crate::domain::amendment::{AmendmentAuthority, AmendmentRequest, AuthorityDecision};
 use crate::domain::selfhood::negotiation::{
@@ -83,17 +84,31 @@ impl SelfService {
     }
 
     /// Identity initialization (§3.4): validated, once only, audited.
+    /// Convenience wrapper over the stable [`SelfService::initialize_from_draft`]
+    /// contract for adapters that collected the four Given fields directly.
     pub fn initialize(&self, input: InitializationInput) -> Result<RevisionId> {
+        self.initialize_from_draft(InitializationDraft {
+            given: input.into_given(),
+            assumptions: Vec::new(),
+        })
+    }
+
+    /// The stable initialization use case (adapter-agnostic contract, see
+    /// [`crate::application::initialization`]): validity checks, idempotent
+    /// guard, one atomic write, audit event. Initial assumptions in the
+    /// draft are the ADAPTER's responsibility to record through the profile
+    /// service — this use case writes only the Self document.
+    pub fn initialize_from_draft(&self, draft: InitializationDraft) -> Result<RevisionId> {
         let loaded = self.store.load()?;
         if loaded.state.is_some() {
             bail!("this individual is already initialized; initialization runs once");
         }
         let today = self.clock.today();
-        let given = input.into_given();
-        given
+        draft
+            .given
             .validate(today)
             .map_err(|reason| anyhow::Error::msg(format!("initialization rejected: {reason}")))?;
-        let state = SelfState::initialize(given);
+        let state = SelfState::initialize(draft.given);
         let receipt = self.store.commit(
             loaded.fingerprint,
             &state,

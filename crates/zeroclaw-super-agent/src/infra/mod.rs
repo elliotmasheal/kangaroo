@@ -7,6 +7,7 @@ pub mod doc_store;
 pub mod document;
 pub mod negotiation_log_jsonl;
 pub mod paths;
+pub mod profile_memory;
 pub mod profile_store;
 pub mod self_store;
 

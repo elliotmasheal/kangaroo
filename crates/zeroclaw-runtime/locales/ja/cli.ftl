@@ -1358,3 +1358,15 @@ channel-approval-opt-allow-always = 常に許可
 channel-approval-opt-reject = 拒否
 channel-approval-opt-reject-with-edit = 編集して拒否
 tool-git-operations-error-docker-runtime-write-unsupported = Git の書き込みコマンドは Docker ランタイムでは利用できません。コンテナ内に閉じ込めることができないためです。
+
+cli-kangaroo-starting = Kangaroo 起動中。データディレクトリ: {$data_dir}。ゲートウェイポート: {$port}
+cli-intake-opening = 初めまして。自分が誰かを知るため、いくつか事実を教えてください。任意の質問は Enter で未告知になります。
+cli-intake-q-name = 私の名前は何にしますか？
+cli-intake-q-birthday = 私の誕生日は？ (YYYY-MM-DD。存在の起算日です)
+cli-intake-q-gender = 私の性別は？ (female / male / non-binary / undisclosed)
+cli-intake-q-style = 最初はどんな話し方にしますか？
+cli-intake-q-assumption = 最初の仮定として扱ってほしい付き合い方の希望はありますか？
+cli-intake-abandoned = インタビューを中断しました。何も書き込んでいません。再実行で最初からやり直せます。
+cli-intake-required = この質問は必須です。これがないと初期化できません。
+cli-intake-done = アイデンティティを初期化しました（リビジョン {$revision}）。こんにちは、話せます。
+cli-kangaroo-chat-ready = チャット準備完了。メッセージを入力してください。:quit で終了。
