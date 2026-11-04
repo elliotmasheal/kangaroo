@@ -42,6 +42,29 @@ fn assemble_product_agent(config: &mut zeroclaw_config::schema::Config, agent_al
         .or_default();
 }
 
+/// What the interactive loop does with one stdin line. The loop's ONLY
+/// input source is stdin — a different handle than the stdout the runtime
+/// streams replies to — so assistant output can never re-enter as user
+/// input through this classifier (the 2026-11-04 self-talk incident was
+/// console noise from a shredded launcher entering stdin, not a role mix).
+#[derive(Debug)]
+enum InputAction {
+    Skip,
+    Quit,
+    Message(String),
+}
+
+fn classify_input(line: &str) -> InputAction {
+    let message = line.trim().to_owned();
+    if message.is_empty() {
+        InputAction::Skip
+    } else if message == ":quit" {
+        InputAction::Quit
+    } else {
+        InputAction::Message(message)
+    }
+}
+
 fn prompt(text: &str) {
     print!("{text}");
     let _ = std::io::stdout().flush();
@@ -145,31 +168,30 @@ async fn main() -> Result<()> {
         if stdin.lock().read_line(&mut line)? == 0 {
             break;
         }
-        let message = line.trim().to_owned();
-        if message.is_empty() {
-            continue;
-        }
-        if message == ":quit" {
-            break;
-        }
-        let overrides = AgentRunOverrides {
-            memory: Some(Arc::clone(&adapter) as Arc<dyn zeroclaw_memory::Memory>),
-            suppress_memory_auto_save: true,
-            ..Default::default()
-        };
-        match zeroclaw_super_agent::begin_turn_turn(
-            config.clone(),
-            capabilities.clone(),
-            agent_alias,
-            message,
-            overrides,
-        )
-        .await
-        {
-            // The runtime's CLI channel already streams the response text to
-            // stdout; printing it here duplicated every reply.
-            Ok(_) => {}
-            Err(error) => println!("error: {error:#}"),
+        match classify_input(&line) {
+            InputAction::Skip => continue,
+            InputAction::Quit => break,
+            InputAction::Message(message) => {
+                let overrides = AgentRunOverrides {
+                    memory: Some(Arc::clone(&adapter) as Arc<dyn zeroclaw_memory::Memory>),
+                    suppress_memory_auto_save: true,
+                    ..Default::default()
+                };
+                match zeroclaw_super_agent::begin_turn_turn(
+                    config.clone(),
+                    capabilities.clone(),
+                    agent_alias,
+                    message,
+                    overrides,
+                )
+                .await
+                {
+                    // The runtime's CLI channel already streams the response
+                    // text to stdout; printing it here duplicated every reply.
+                    Ok(_) => {}
+                    Err(error) => println!("error: {error:#}"),
+                }
+            }
         }
     }
     Ok(())
@@ -206,5 +228,22 @@ mod tests {
         assemble_product_agent(&mut config, "kangaroo");
         assert_eq!(config.agents["kangaroo"].risk_profile.as_str(), "kangaroo");
         assert!(config.risk_profiles.contains_key("kangaroo"));
+    }
+
+    /// The interactive loop's input contract: every non-empty, non-control
+    /// stdin line is ONE user message. Assistant replies live on stdout —
+    /// a handle this classifier never touches — so their text can only
+    /// become a user turn if something outside this process writes it to
+    /// the console input buffer (the shredded-launcher incident).
+    #[test]
+    fn stdin_classification_keeps_the_user_channel_structural() {
+        assert!(matches!(classify_input("\n"), InputAction::Skip));
+        assert!(matches!(classify_input("   \n"), InputAction::Skip));
+        assert!(matches!(classify_input(":quit\n"), InputAction::Quit));
+        assert!(matches!(classify_input("  :quit  \n"), InputAction::Quit));
+        match classify_input("你好\n") {
+            InputAction::Message(message) => assert_eq!(message, "你好"),
+            other => panic!("expected a message, got {other:?}"),
+        }
     }
 }
