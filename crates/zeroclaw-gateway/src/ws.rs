@@ -338,6 +338,25 @@ async fn resolve_ws_memory_handle(
         .map(Some)
 }
 
+/// The end-of-turn consolidation memory for one WS connection (seam B): a
+/// host-installed capability provider owns the handle outright — its
+/// `consolidation_memory` (possibly `None`, disabling consolidation) is
+/// returned as-is. With no provider (or a provider that declines this
+/// connection) the config-backed resolution runs exactly as before the
+/// seam existed.
+async fn resolve_ws_turn_memory(
+    turn_capabilities: Option<&crate::TurnCapabilityProvider>,
+    config: &zeroclaw_config::schema::Config,
+    agent_alias: &str,
+) -> anyhow::Result<Option<Arc<dyn zeroclaw_memory::Memory>>> {
+    if let Some(provider) = turn_capabilities {
+        if let Some(host) = provider() {
+            return Ok(host.consolidation_memory);
+        }
+    }
+    resolve_ws_memory_handle(config, agent_alias).await
+}
+
 /// Provider, model, and temperature for the turn-end WS memory
 /// consolidation, resolved from the live provider reference the agent
 /// reports after the turn. A mid-session model switch replaces the agent's
@@ -499,22 +518,24 @@ async fn handle_socket(
     // construction is deferred until after the optional `connect` frame so the
     // client can provide a per-session cwd for the security sandbox root.
     let config = state.config.read().clone();
-    let ws_memory = match resolve_ws_memory_handle(&config, &agent_alias).await {
-        Ok(memory) => memory,
-        Err(e) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "agent": &agent_alias,
-                        "error": format!("{e:#}"),
-                    })),
-                "WS per-agent memory resolution failed; consolidation disabled for connection"
-            );
-            None
-        }
-    };
+    let ws_memory =
+        match resolve_ws_turn_memory(state.turn_capabilities.as_ref(), &config, &agent_alias).await
+        {
+            Ok(memory) => memory,
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "agent": &agent_alias,
+                            "error": format!("{e:#}"),
+                        })),
+                    "WS per-agent memory resolution failed; consolidation disabled for connection"
+                );
+                None
+            }
+        };
     let mut resumed = false;
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
@@ -694,48 +715,75 @@ async fn handle_socket(
         state.config.clone(),
         state.agent_lifecycle.clone(),
     );
-    let mut agent =
-        match zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_capability(
-            state.config.clone(),
-            &agent_alias,
-            Some(&session_cwd),
-            true,
-            false,
-            // The gateway WebSocket turn does not transport ACP file attachments.
-            false,
-            state.sop_engine.clone(),
-            state.sop_audit.clone(),
-            Some(state.canvas_store.clone()),
-            Some(execution_capability),
-        )
-        .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "Agent initialization failed"
-                );
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": format!("Failed to initialise agent: {e}"),
-                    "code": "AGENT_INIT_FAILED"
-                });
-                let _ = sender.send(Message::Text(err.to_string().into())).await;
-                let _ = sender
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1011,
-                        reason: axum::extract::ws::Utf8Bytes::from_static(
-                            "Agent initialization failed",
-                        ),
-                    })))
-                    .await;
-                return;
-            }
-        };
+    // Seam A: a host-installed provider replaces the WS agent's capability
+    // sources for this connection. `None` (no provider, or it declines) runs
+    // the config-backed construction exactly as before the seam existed.
+    let agent_init = match state
+        .turn_capabilities
+        .as_ref()
+        .and_then(|provider| provider())
+    {
+        Some(host) => {
+            zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_supplied_capabilities(
+                state.config.clone(),
+                &agent_alias,
+                Some(&session_cwd),
+                true,
+                false,
+                // The gateway WebSocket turn does not transport ACP file attachments.
+                false,
+                state.sop_engine.clone(),
+                state.sop_audit.clone(),
+                Some(state.canvas_store.clone()),
+                Some(execution_capability),
+                host.capabilities,
+            )
+            .await
+        }
+        None => {
+            zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_capability(
+                state.config.clone(),
+                &agent_alias,
+                Some(&session_cwd),
+                true,
+                false,
+                // The gateway WebSocket turn does not transport ACP file attachments.
+                false,
+                state.sop_engine.clone(),
+                state.sop_audit.clone(),
+                Some(state.canvas_store.clone()),
+                Some(execution_capability),
+            )
+            .await
+        }
+    };
+    let mut agent = match agent_init {
+        Ok(a) => a,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Agent initialization failed"
+            );
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Failed to initialise agent: {e}"),
+                "code": "AGENT_INIT_FAILED"
+            });
+            let _ = sender.send(Message::Text(err.to_string().into())).await;
+            let _ = sender
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: axum::extract::ws::Utf8Bytes::from_static(
+                        "Agent initialization failed",
+                    ),
+                })))
+                .await;
+            return;
+        }
+    };
     // Keep ONE ingress identity for the WebSocket turn: the turn span records
     // `channel = "wss"`, and observer events derive from `Agent.channel_name`,
     // so this must stay `wss` or a single turn is split across two names.
@@ -3149,6 +3197,15 @@ data: {{\"type\":\"message_stop\"}}\n\n"
 
     impl ParkedTurnFixture {
         async fn spawn() -> Self {
+            Self::spawn_with_turn_capabilities(None).await
+        }
+
+        /// Spawn with an optional host-installed turn-capability provider:
+        /// `None` is the default (unmodified) gateway form; `Some` exercises
+        /// the host seam with a real connection.
+        async fn spawn_with_turn_capabilities(
+            turn_capabilities: Option<crate::TurnCapabilityProvider>,
+        ) -> Self {
             let (request_seen_tx, request_seen) =
                 tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
             let (released, released_rx) = tokio::sync::watch::channel(0usize);
@@ -3238,9 +3295,13 @@ data: {{\"type\":\"message_stop\"}}\n\n"
 
             let backend = zeroclaw_infra::make_session_backend(&workspace, "sqlite")
                 .expect("sqlite session backend");
+            let base = AppState {
+                turn_capabilities,
+                ..crate::api::tests::test_state(config)
+            };
             let state = AppState {
                 session_backend: Some(backend.clone()),
-                ..crate::api::tests::test_state(config)
+                ..base
             };
             let gateway_app = Router::new()
                 .route("/ws/chat", get(handle_ws_chat))
@@ -5734,5 +5795,130 @@ data: {{\"type\":\"message_stop\"}}\n\n"
             v.get("model_context_window").is_none(),
             "model_context_window is additive and omitted when unset"
         );
+    }
+
+    /// A complete `RuntimeCapabilities` set a test host can hand the seam:
+    /// config-backed sources with a no-op observer (the same shape the
+    /// kangaroo host assembles, minus its domain adapters).
+    fn seam_test_capabilities() -> zeroclaw_runtime::composition::RuntimeCapabilities {
+        zeroclaw_runtime::composition::RuntimeCapabilities::config_backed_with_observer(Arc::new(
+            zeroclaw_runtime::observability::NoopObserver,
+        ))
+    }
+
+    /// A config where the config-backed memory resolution answers `None`
+    /// (backend `none`), so the host-owned handle is the only source of a
+    /// non-`None` consolidation memory.
+    fn seam_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::schema::Config {
+        let mut config = zeroclaw_config::schema::Config {
+            data_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            ..Default::default()
+        };
+        config.memory.backend = "none".to_string();
+        config.agents.insert(
+            "web".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    /// Seam B, host wins: the provider's `consolidation_memory` IS the
+    /// end-of-turn handle — the gateway never rebuilds a config-backed one.
+    #[tokio::test]
+    async fn seam_b_host_provider_owns_the_consolidation_handle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = seam_test_config(&tmp);
+        let mut memory_config = config.memory.clone();
+        memory_config.backend = "markdown".to_string();
+        let host_memory: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&memory_config, &tmp.path().join("mem"), None)
+                .expect("markdown memory backend"),
+        );
+        let expected = host_memory.clone();
+        let provider: crate::TurnCapabilityProvider = Arc::new(move || {
+            Some(crate::HostTurnCapabilities {
+                capabilities: seam_test_capabilities(),
+                consolidation_memory: Some(expected.clone()),
+            })
+        });
+        let resolved = resolve_ws_turn_memory(Some(&provider), &config, "web")
+            .await
+            .expect("host handle resolves");
+        let resolved = resolved.expect("host supplied a handle");
+        assert!(
+            Arc::ptr_eq(&resolved, &host_memory),
+            "the host handle wins by identity"
+        );
+    }
+
+    /// Seam B, host can also disable consolidation: `consolidation_memory:
+    /// None` passes through as `None` — the gateway does not substitute a
+    /// config-backed handle behind the host's back.
+    #[tokio::test]
+    async fn seam_b_host_none_disables_consolidation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = seam_test_config(&tmp);
+        let provider: crate::TurnCapabilityProvider = Arc::new(|| {
+            Some(crate::HostTurnCapabilities {
+                capabilities: seam_test_capabilities(),
+                consolidation_memory: None,
+            })
+        });
+        let resolved = resolve_ws_turn_memory(Some(&provider), &config, "web")
+            .await
+            .expect("host decision resolves");
+        assert!(resolved.is_none(), "host None means no consolidation");
+    }
+
+    /// Seam B, default path: with no provider installed (or a provider that
+    /// declines), the resolution is exactly the pre-seam config-backed one.
+    #[tokio::test]
+    async fn seam_b_absent_provider_falls_back_to_config_resolution() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = seam_test_config(&tmp);
+        let without_provider = resolve_ws_turn_memory(None, &config, "web")
+            .await
+            .expect("default resolution");
+        let direct = resolve_ws_memory_handle(&config, "web")
+            .await
+            .expect("direct config resolution");
+        assert!(
+            without_provider.is_none() && direct.is_none(),
+            "default path must match the config resolution (both None here)"
+        );
+        // A provider that declines this connection behaves identically.
+        let declining: crate::TurnCapabilityProvider = Arc::new(|| None);
+        let declined = resolve_ws_turn_memory(Some(&declining), &config, "web")
+            .await
+            .expect("declined provider falls back");
+        assert!(declined.is_none(), "declined provider uses config path");
+    }
+
+    /// Seam A end-to-end: with a host provider installed, a real WS turn is
+    /// driven by the SUPPLIED capabilities — the agent constructs through the
+    /// new variant, the turn streams from the provider fixture, and the
+    /// session settles exactly as the default path does.
+    #[tokio::test]
+    async fn seam_a_host_supplied_capabilities_drive_a_full_ws_turn() {
+        let mut fixture = ParkedTurnFixture::spawn_with_turn_capabilities(Some(Arc::new(|| {
+            Some(crate::HostTurnCapabilities {
+                capabilities: seam_test_capabilities(),
+                consolidation_memory: None,
+            })
+        })))
+        .await;
+        let (mut client, _) = fixture.connect("seam-a-turn").await;
+        let request = fixture.start_parked_turn(&mut client, "hello").await;
+        assert_eq!(
+            request["model"], "claude-test",
+            "the turn runs on the fixture model through supplied capabilities"
+        );
+        fixture.release_next();
+        fixture.wait_for_turn_to_settle("gw_seam-a-turn").await;
+        fixture.shutdown();
     }
 }

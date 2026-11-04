@@ -15,8 +15,10 @@ default = []
 dev-self-amendment = []
 
 [dependencies]
-# composition types only (RuntimeCapabilities capability sources); no runtime
-# code is consumed or modified.
+# composition types only via RuntimeCapabilities, plus the two host seams the
+# WebUI reuse path needs (agent construction with supplied capabilities, and
+# the gateway's host-installed turn-capability provider). Downstream edits are
+# additive; no upstream PR and no parallel gateway rewrite.
 zeroclaw-runtime.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-spawn.workspace = true

@@ -792,6 +792,10 @@ pub struct AppState {
     /// Shared SOP audit logger from the daemon (for WS agent sessions).
     pub sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     pub sop_driver_handles: Option<zeroclaw_runtime::sop::SopDriverHandles>,
+    /// Host-installed per-turn capability provider for WS agent turns (seam
+    /// A: agent construction; seam B: end-of-turn consolidation handle).
+    /// `None` = pure zeroclaw form: config-backed construction, unchanged.
+    pub turn_capabilities: Option<TurnCapabilityProvider>,
 }
 
 impl AppState {
@@ -817,6 +821,27 @@ impl AppState {
     }
 }
 
+/// The host-installed per-turn capability set for WS agent turns (seam A)
+/// plus the end-of-turn consolidation memory handle (seam B). A host (e.g.
+/// the kangaroo product bin) builds this per connection; every other form
+/// leaves the provider uninstalled and the default config-backed
+/// construction runs unchanged.
+pub struct HostTurnCapabilities {
+    /// The capabilities the WS agent is constructed with. Must be complete:
+    /// supplied capabilities never fall back to config-backed sources (see
+    /// the runtime's supplied-only traps).
+    pub capabilities: zeroclaw_runtime::composition::RuntimeCapabilities,
+    /// The end-of-turn WS memory consolidation handle. `None` disables
+    /// consolidation for the connection — the host owns that decision, the
+    /// gateway never rebuilds a config-backed handle behind its back.
+    pub consolidation_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
+}
+
+/// Decides, per WS connection, whether the host supplies the turn's
+/// capabilities. `None` (the provider itself is absent or returns `None`)
+/// means the default config-backed construction for that connection.
+pub type TurnCapabilityProvider = Arc<dyn Fn() -> Option<HostTurnCapabilities> + Send + Sync>;
+
 /// Daemon-owned services whose lifecycle matches one supervised gateway run.
 pub struct GatewaySupervision {
     readiness: Option<zeroclaw_runtime::daemon::GatewayReadinessReporter>,
@@ -826,6 +851,10 @@ pub struct GatewaySupervision {
     /// register resumed headless drivers here so a reload drains them with the
     /// generation that owns them. `None` standalone, where no generation exists.
     sop_driver_handles: Option<zeroclaw_runtime::sop::SopDriverHandles>,
+    /// Host-installed per-turn capability provider (seam A/B). `None` — the
+    /// default for every existing construction path — keeps the pure
+    /// config-backed WS agent construction.
+    turn_capabilities: Option<TurnCapabilityProvider>,
 }
 
 impl GatewaySupervision {
@@ -842,7 +871,17 @@ impl GatewaySupervision {
             plugin_webhooks,
             authority,
             sop_driver_handles,
+            turn_capabilities: None,
         }
+    }
+
+    /// Install the host's per-turn capability provider. Only hosts that
+    /// replace the WS agent's capability sources call this; the supervised
+    /// and standalone zeroclaw forms never do.
+    #[must_use]
+    pub fn with_turn_capabilities(mut self, provider: TurnCapabilityProvider) -> Self {
+        self.turn_capabilities = Some(provider);
+        self
     }
 }
 
@@ -1333,6 +1372,7 @@ pub async fn run_gateway_with_plugin_webhooks(
         plugin_webhooks,
         authority,
         sop_driver_handles,
+        turn_capabilities,
     } = supervision;
     let (shared_pairing, shared_inbound_auth, shared_config) = match daemon_authority {
         Some(authority) => (
@@ -2423,6 +2463,7 @@ pub async fn run_gateway_with_plugin_webhooks(
         sop_engine,
         sop_audit,
         sop_driver_handles,
+        turn_capabilities,
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(zeroclaw_runtime::security::SecretStore::new(
@@ -6054,6 +6095,7 @@ mod tests {
         let registry = with_registry.then(|| Arc::new(api_pairing::DeviceRegistry::new(&data_dir)));
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -8848,6 +8890,7 @@ path = "{trigger_path}"
     async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(Config::default());
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -9617,6 +9660,7 @@ path = "{trigger_path}"
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(Config::default());
         AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -11205,6 +11249,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(Config::default());
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12127,6 +12172,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(Config::default());
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12251,6 +12297,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12354,6 +12401,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(Config::default());
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12563,6 +12611,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12653,6 +12702,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),
@@ -12748,6 +12798,7 @@ data: [DONE]\n\n";
 
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         let state = AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),

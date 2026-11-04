@@ -2633,6 +2633,52 @@ impl Agent {
         .await
     }
 
+    /// [`Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_capability`]
+    /// with the agent's provider, memory, observer and supplied tools taken
+    /// from `capabilities` — the host-installed WS seam. No config-backed
+    /// fallback: the supplied set must be complete (see the supplied-only
+    /// traps). Everything else — security policy, model route, tool policy —
+    /// still resolves from config. `principal` is `None` for gateway turns.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn from_live_config_with_session_cwd_and_mcp_backchannel_with_supplied_capabilities(
+        live_config: zeroclaw_config::live::LiveConfigHandle,
+        agent_alias: &str,
+        session_cwd: Option<&Path>,
+        initialize_mcp: bool,
+        exclude_memory: bool,
+        acp_delivery: bool,
+        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
+        sop_audit: Option<Arc<SopAuditLogger>>,
+        canvas_store: Option<tools::CanvasStore>,
+        execution_capability: Option<AgentExecutionCapability>,
+        capabilities: crate::composition::RuntimeCapabilities,
+    ) -> Result<Self> {
+        let config = live_config.read().clone();
+        Self::from_config_with_session_cwd_and_mcp_approval_mode(
+            &config,
+            agent_alias,
+            session_cwd,
+            initialize_mcp,
+            true,
+            exclude_memory,
+            acp_delivery,
+            None,
+            sop_engine,
+            sop_audit,
+            canvas_store,
+            None,
+            Some(live_config),
+            None,
+            None,
+            execution_capability,
+            CapabilityBinding::Supplied {
+                capabilities,
+                principal: None,
+            },
+        )
+        .await
+    }
+
     /// Build a daemon-backed ACP/WS Agent from live tool and history policy
     /// while keeping its model route generation pinned until reconnect.
     pub async fn from_live_config_with_session_cwd_and_mcp_backchannel(
@@ -21968,6 +22014,46 @@ mod capability_construction_tests {
         .await
         .unwrap();
         assert_eq!(memory.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// The gateway WS seam: the new session-cwd constructor must bind the
+    /// SUPPLIED capabilities — the memory source it consults is the host's,
+    /// with no config-backed fallback — while taking the same WS-shaped
+    /// parameter set (canvas, SOP pair, execution capability) the gateway
+    /// passes today.
+    #[tokio::test]
+    async fn ws_seam_constructor_binds_supplied_capabilities() {
+        use crate::composition::test_support::NoTools;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = two_provider_config(&tmp);
+        let memory = Arc::new(RecordingMemory::default());
+        let caps = recording_capabilities(
+            Arc::new(RecordingProviders::default()),
+            memory.clone(),
+            Arc::new(NoTools),
+        );
+        let agent =
+            Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_supplied_capabilities(
+                zeroclaw_config::live::LiveConfig::new(config).handle(),
+                "test-agent",
+                None,
+                false,
+                false,
+                false,
+                None,
+                None,
+                None,
+                None,
+                caps,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *memory.agents.lock(),
+            vec!["test-agent"],
+            "the supplied memory source is the one consulted"
+        );
+        let _ = agent;
     }
 
     #[tokio::test]

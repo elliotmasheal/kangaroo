@@ -1562,6 +1562,7 @@ mod tests {
             std::sync::Arc::new(zeroclaw_memory::NoneMemory::new("none"));
         let state_authority = zeroclaw_runtime::LiveConfigAuthority::new(config);
         AppState {
+            turn_capabilities: None,
             config: state_authority.live_handle(),
             config_authority: state_authority.clone(),
             agent_lifecycle: state_authority.agent_lifecycle(),

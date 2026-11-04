@@ -3410,6 +3410,7 @@ mod tests {
         let memory: Arc<dyn zeroclaw_memory::Memory> =
             Arc::new(zeroclaw_memory::NoneMemory::new("api-config-test"));
         AppState {
+            turn_capabilities: None,
             config: authority.live_handle(),
             config_authority: authority.clone(),
             agent_lifecycle: authority.agent_lifecycle(),
