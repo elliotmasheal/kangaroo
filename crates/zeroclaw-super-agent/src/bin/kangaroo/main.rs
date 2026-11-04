@@ -12,6 +12,7 @@
 mod intake;
 
 use anyhow::{Context, Result, bail};
+use chrono::Local;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
@@ -21,6 +22,9 @@ use zeroclaw_super_agent::application::profile_service::ProfileService;
 use zeroclaw_super_agent::application::self_service::SelfService;
 use zeroclaw_super_agent::infra::paths;
 use zeroclaw_super_agent::infra::profile_memory::ProfileMemoryAdapter;
+use zeroclaw_super_agent::infra::transcript::{
+    TranscriptObserver, TranscriptWriter, transcripts_dir,
+};
 use zeroclaw_super_agent::tools::ProfileToolsSource;
 
 /// The product's agent contract in the canonical config: the `kangaroo`
@@ -137,9 +141,21 @@ async fn main() -> Result<()> {
     }
 
     // Capability generation: config-backed sources, the profile tools
-    // wrapped onto the native registry via the ToolSource seam, and the real
-    // memory backend wrapped in the projection adapter.
-    let observer = Arc::new(zeroclaw_runtime::observability::NoopObserver);
+    // wrapped onto the native registry via the ToolSource seam, the real
+    // memory backend wrapped in the projection adapter, and the append-only
+    // conversation transcript (journal layer — never brain.db, never blocks).
+    let agent_alias = "kangaroo";
+    let model_ref = config
+        .agents
+        .get(agent_alias)
+        .map(|agent| agent.model_provider.to_string());
+    let session_id = format!("cli-{}", Local::now().format("%Y%m%d-%H%M%S"));
+    let transcript = Arc::new(TranscriptWriter::new(
+        transcripts_dir(&root),
+        session_id,
+        model_ref,
+    ));
+    let observer = Arc::new(TranscriptObserver::new(Arc::clone(&transcript)));
     let mut capabilities = RuntimeCapabilities::config_backed_with_observer(observer);
     capabilities.tools = Arc::new(ProfileToolsSource::wrapping(
         Arc::clone(&profile_service),
@@ -158,7 +174,6 @@ async fn main() -> Result<()> {
 
     // The agent alias must exist in the canonical config (`agents` map);
     // see `assemble_product_agent` for why this happens in the bin itself.
-    let agent_alias = "kangaroo";
     assemble_product_agent(&mut config, agent_alias);
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
@@ -172,6 +187,7 @@ async fn main() -> Result<()> {
             InputAction::Skip => continue,
             InputAction::Quit => break,
             InputAction::Message(message) => {
+                transcript.record_user(&message);
                 let overrides = AgentRunOverrides {
                     memory: Some(Arc::clone(&adapter) as Arc<dyn zeroclaw_memory::Memory>),
                     suppress_memory_auto_save: true,
@@ -187,8 +203,8 @@ async fn main() -> Result<()> {
                 .await
                 {
                     // The runtime's CLI channel already streams the response
-                    // text to stdout; printing it here duplicated every reply.
-                    Ok(_) => {}
+                    // text to stdout; the full reply is journaled here.
+                    Ok(response) => transcript.record_assistant(&response),
                     Err(error) => println!("error: {error:#}"),
                 }
             }

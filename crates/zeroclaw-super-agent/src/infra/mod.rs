@@ -10,6 +10,7 @@ pub mod paths;
 pub mod profile_memory;
 pub mod profile_store;
 pub mod self_store;
+pub mod transcript;
 
 use anyhow::Result;
 use std::path::Path;
