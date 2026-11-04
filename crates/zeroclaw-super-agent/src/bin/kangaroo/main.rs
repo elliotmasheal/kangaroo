@@ -9,6 +9,7 @@
 //! the memory adapter and the profile tools supplied through the ToolSource
 //! seam. No `zeroclaw-runtime` source file is involved.
 
+mod consolidate;
 mod intake;
 
 use anyhow::{Context, Result, bail};
@@ -110,6 +111,10 @@ async fn main() -> Result<()> {
     // surviving .zeroclaw reference (bootstrap default, env, operator entry)
     // fails startup instead of falling back to ZeroClaw state.
     paths::assert_startup_isolation(&config, &root)?;
+    if std::env::args().nth(1).as_deref() == Some("consolidate") {
+        // Phase B: nightly consolidation pass (scheduled externally).
+        return consolidate::run(&root, &config).await;
+    }
     let self_store = zeroclaw_super_agent::infra::markdown_self_store(&root)?;
     let profile_store = zeroclaw_super_agent::infra::markdown_profile_store(&root)?;
     let negotiation_log = zeroclaw_super_agent::infra::jsonl_negotiation_log(&root)?;

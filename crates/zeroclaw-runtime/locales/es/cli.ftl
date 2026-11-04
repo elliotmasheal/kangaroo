@@ -1372,3 +1372,6 @@ cli-intake-abandoned = Entrevista abandonada; no se escribio nada. Ejecutame de 
 cli-intake-required = Esta pregunta es obligatoria: no puedo inicializarme sin ella.
 cli-intake-done = Identidad inicializada (revision {$revision}). Hola, ya puedo hablar.
 cli-kangaroo-chat-ready = Conversacion lista. Escribe un mensaje; :quit para salir.
+cli-transcript-write-failed = No se pudo guardar una parte de esta conversacion en el diario (error de escritura: {$error}). La conversacion continua, pero esa parte no quedara trazable.
+cli-consolidate-summary = Consolidacion terminada: {$windows} ventana(s), {$llm_calls} llamada(s) al LLM; {$episodes} episodio(s) y {$hypotheses} hipotesis escritos; {$audited} lineas ya consolidadas omitidas; cursor en {$cursor_file} linea {$cursor_offset}.
+cli-consolidate-budget-limited = El presupuesto de llamadas al LLM de esta ejecucion se agoto; el resto queda para la proxima. Las lineas sin consolidar nunca se comprimen ni se descartan.

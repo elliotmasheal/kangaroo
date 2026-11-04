@@ -1739,3 +1739,6 @@ cli-intake-abandoned = Intake abandoned; nothing was written. Run me again to st
 cli-intake-required = This one is required - I cannot start without it.
 cli-intake-done = Identity initialized (revision {$revision}). Hello - I can talk now.
 cli-kangaroo-chat-ready = Chat ready. Type a message; :quit exits.
+cli-transcript-write-failed = A part of this conversation could not be saved to the journal (write error: {$error}). The chat continues, but that part will not be traceable.
+cli-consolidate-summary = Consolidation done: {$windows} window(s), {$llm_calls} LLM call(s); {$episodes} episode(s) and {$hypotheses} hypothesis/hypotheses written; {$audited} already-consolidated lines skipped; cursor at {$cursor_file} line {$cursor_offset}.
+cli-consolidate-budget-limited = The LLM call budget for this run is exhausted; the rest is left for the next run. Unconsolidated journal lines are never compressed or dropped.

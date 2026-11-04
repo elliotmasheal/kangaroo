@@ -22,6 +22,7 @@ zeroclaw-log.workspace = true
 zeroclaw-api.workspace = true
 zeroclaw-config.workspace = true
 zeroclaw-memory.workspace = true
+zeroclaw-providers.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 cap-std = "4"

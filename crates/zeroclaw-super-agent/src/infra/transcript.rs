@@ -6,9 +6,9 @@
 //! append degrades to a warning plus a drop counter — the conversation never
 //! blocks or dies on transcript IO.
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,15 +36,22 @@ fn bounded_summary(text: &str) -> String {
     }
 }
 
-#[derive(Serialize)]
-struct TranscriptEntry<'a> {
-    ts: &'a str,
-    role: &'a str,
-    text: &'a str,
-    session_id: &'a str,
-    msg_id: String,
-    turn_no: u64,
-    model: Option<&'a str>,
+/// One journal row. `Deserialize` exists so the consolidation pass (and its
+/// tests) can re-read written transcripts; the journal itself only appends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptEntry {
+    pub ts: String,
+    pub role: String,
+    pub text: String,
+    pub session_id: String,
+    pub msg_id: String,
+    pub turn_no: u64,
+    pub model: Option<String>,
+}
+
+/// Parse one JSONL line back into an entry (consolidation read path).
+pub fn parse_entry(line: &str) -> Result<TranscriptEntry> {
+    serde_json::from_str(line).context("transcript line parse failed")
 }
 
 /// Returns `(local day "YYYY-MM-DD", RFC 3339 timestamp)`.
@@ -64,6 +71,10 @@ pub struct TranscriptWriter {
     now: NowFn,
     state: Mutex<State>,
     dropped: AtomicU64,
+    /// Set on the first failed append so the user sees exactly one terminal
+    /// notice (data loss must be visible, not silent); later failures only
+    /// bump the counter and the WARN log.
+    user_notified: std::sync::atomic::AtomicBool,
 }
 
 impl TranscriptWriter {
@@ -96,6 +107,7 @@ impl TranscriptWriter {
                 turn_no: 0,
             }),
             dropped: AtomicU64::new(0),
+            user_notified: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -137,13 +149,13 @@ impl TranscriptWriter {
             .and_then(|mut state| {
                 state.seq += 1;
                 let entry = TranscriptEntry {
-                    ts: &ts,
-                    role,
-                    text,
-                    session_id: &self.session_id,
+                    ts: ts.clone(),
+                    role: role.to_owned(),
+                    text: text.to_owned(),
+                    session_id: self.session_id.clone(),
                     msg_id: format!("{}-{:06}", self.session_id, state.seq),
                     turn_no: turn_no.unwrap_or(state.turn_no),
-                    model: self.model.as_deref(),
+                    model: self.model.clone(),
                 };
                 let line = serde_json::to_string(&entry)
                     .context("transcript entry serialization failed")?;
@@ -169,6 +181,16 @@ impl TranscriptWriter {
             });
         if let Err(error) = result {
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if !self.user_notified.swap(true, Ordering::Relaxed) {
+                // First failure in this session: surface the loss on the
+                // terminal in the user's language, once, then stay quiet.
+                let error_text = format!("{error:#}");
+                let notice = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                    "cli-transcript-write-failed",
+                    &[("error", &error_text)],
+                );
+                eprintln!("{notice}");
+            }
             record!(
                 WARN,
                 Event::new(module_path!(), Action::Note)

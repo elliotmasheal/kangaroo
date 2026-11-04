@@ -1370,3 +1370,6 @@ cli-intake-abandoned = インタビューを中断しました。何も書き込
 cli-intake-required = この質問は必須です。これがないと初期化できません。
 cli-intake-done = アイデンティティを初期化しました（リビジョン {$revision}）。こんにちは、話せます。
 cli-kangaroo-chat-ready = チャット準備完了。メッセージを入力してください。:quit で終了。
+cli-transcript-write-failed = この会話の一部をジャーナルに保存できませんでした（書き込みエラー：{$error}）。会話は続行しますが、この部分は後から参照できません。
+cli-consolidate-summary = 整理完了：{$windows} ウィンドウ、LLM 呼び出し {$llm_calls} 回。エピソード {$episodes} 件、仮説 {$hypotheses} 件を追加。整理済み {$audited} 件をスキップ。カーソルは {$cursor_file} の {$cursor_offset} 行目。
+cli-consolidate-budget-limited = 今回の LLM 呼び出し上限に達しました。残りは次回に持ち越します。未整理のジャーナル行は圧縮も破棄もされません。
