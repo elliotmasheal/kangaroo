@@ -35,14 +35,16 @@ function Fail([string]$message) {
 }
 
 function Invoke-Kangaroo {
+    # Out-Host: assigning a function call captures its output stream, which
+    # would swallow the binary's stdout into $runCode. Route it to the console.
     if ($script:PipedInput.Count -gt 0) {
-        $script:PipedInput | & $exe
+        $script:PipedInput | & $exe | Out-Host
     } else {
-        & $exe
+        & $exe | Out-Host
     }
     $code = $LASTEXITCODE
     if ($null -eq $code) { $code = 1 }
-    exit $code
+    return $code
 }
 
 try {
@@ -102,11 +104,11 @@ try {
     }
 
     if (Test-BinaryFresh) {
-        Invoke-Kangaroo
-    }
-
-    # 5. 源码有变更：编译。输出策略——错误完整、上游警告折叠、自身警告保留。
-    Write-Host "[袋鼠] 检测到源码比二进制新，正在编译……"
+        # 源码未变：完全跳过 cargo，直接复用已构建二进制。
+        Write-Host "[袋鼠] 二进制已是最新，直接启动……" -ForegroundColor DarkGray
+    } else {
+        # 源码有变更：编译。输出策略——错误完整、上游警告折叠、自身警告保留。
+        Write-Host "[袋鼠] 检测到源码比二进制新，正在编译……"
     $ErrorActionPreference = "Continue"
     function Invoke-FilteredBuild {
         $out = & cargo build --jobs 2 -p zeroclaw-super-agent --bin kangaroo 2>&1 |
@@ -172,7 +174,10 @@ try {
     }
 
     Write-Host "[袋鼠] 编译完成，启动……" -ForegroundColor Green
-    Invoke-Kangaroo
+    }
+
+    $runCode = Invoke-Kangaroo
+    exit $runCode
 } catch {
     Fail $_.Exception.Message
 }
