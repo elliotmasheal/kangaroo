@@ -1376,3 +1376,4 @@ cli-consolidate-budget-limited = 今回の LLM 呼び出し上限に達しまし
 cli-consolidate-started = 前回の残りをバックグラウンドで整理し、エピソード層に書き込んでいます。会話には影響しません。
 cli-consolidate-already-running = 整理がすでに実行中のため、今回はスキップします。
 cli-consolidate-auto-done = バックグラウンド整理が完了：エピソード {$episodes} 件、仮説 {$hypotheses} 件を追加。
+cli-assignment-attention = ワーカーに渡したタスクが {$minutes} 分以上応答していません（割り当て {$id}）。黙って再試行はしません。確認するか破棄するか指示してください。

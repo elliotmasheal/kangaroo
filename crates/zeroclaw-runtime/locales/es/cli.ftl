@@ -1378,3 +1378,4 @@ cli-consolidate-budget-limited = El presupuesto de llamadas al LLM de esta ejecu
 cli-consolidate-started = Estoy consolidando en segundo plano lo que quedo del diario de la ultima vez; la conversacion no se ve afectada.
 cli-consolidate-already-running = Ya hay una consolidacion en marcha; esta se omite.
 cli-consolidate-auto-done = Consolidacion en segundo plano terminada: {$episodes} episodio(s) y {$hypotheses} hipotesis escritos.
+cli-assignment-attention = Una tarea entregada a un worker lleva mas de {$minutes} minuto(s) sin responder (asignacion {$id}). No la reintentare en silencio: dime si revisarla o descartarla.

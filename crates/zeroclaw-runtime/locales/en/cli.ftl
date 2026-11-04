@@ -1745,3 +1745,4 @@ cli-consolidate-budget-limited = The LLM call budget for this run is exhausted; 
 cli-consolidate-started = Catching up on the journal left from last time — consolidating memories in the background. The conversation is not affected.
 cli-consolidate-already-running = A consolidation pass is already in progress; this one is skipped.
 cli-consolidate-auto-done = Background consolidation finished: {$episodes} episode(s) and {$hypotheses} hypothesis/hypotheses written.
+cli-assignment-attention = A task handed to a worker has been quiet for over {$minutes} minute(s) (assignment {$id}). I will not retry it silently: tell me to check on it or drop it.

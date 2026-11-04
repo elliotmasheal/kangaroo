@@ -3,6 +3,7 @@
 //! handle live in [`super_agent_app`].
 
 pub mod initialization;
+pub mod orchestration;
 pub mod ports;
 pub mod profile_service;
 pub mod self_service;

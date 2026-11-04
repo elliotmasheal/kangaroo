@@ -7,6 +7,7 @@
 //! `tests/domain_purity.rs`).
 
 pub mod amendment;
+pub mod orchestration;
 pub mod profile;
 pub mod selfhood;
 

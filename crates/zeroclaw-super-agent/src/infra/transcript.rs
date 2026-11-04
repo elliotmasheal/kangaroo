@@ -127,8 +127,11 @@ impl TranscriptWriter {
         self.record("user", text, turn_no);
     }
 
-    pub fn record_assistant(&self, text: &str) {
-        self.record("assistant", text, None);
+    /// Append one assistant reply. Returns its `msg_id` — the trace anchor a
+    /// worker result is transcribed against (M3 evidence reference). `None`
+    /// means the append degraded and the line is not traceable.
+    pub fn record_assistant(&self, text: &str) -> Option<String> {
+        self.record("assistant", text, None)
     }
 
     pub fn record_tool(&self, tool: &str, success: bool, summary: &str) {
@@ -140,20 +143,22 @@ impl TranscriptWriter {
         self.record("tool", &text, None);
     }
 
-    fn record(&self, role: &str, text: &str, turn_no: Option<u64>) {
+    fn record(&self, role: &str, text: &str, turn_no: Option<u64>) -> Option<String> {
         let (day, ts) = (self.now)();
+        let mut written = None;
         let result = self
             .state
             .lock()
             .map_err(|_| anyhow::Error::msg("transcript state mutex poisoned"))
             .and_then(|mut state| {
                 state.seq += 1;
+                let msg_id = format!("{}-{:06}", self.session_id, state.seq);
                 let entry = TranscriptEntry {
                     ts: ts.clone(),
                     role: role.to_owned(),
                     text: text.to_owned(),
                     session_id: self.session_id.clone(),
-                    msg_id: format!("{}-{:06}", self.session_id, state.seq),
+                    msg_id: msg_id.clone(),
                     turn_no: turn_no.unwrap_or(state.turn_no),
                     model: self.model.clone(),
                 };
@@ -177,6 +182,7 @@ impl TranscriptWriter {
                 writeln!(file, "{line}").context("transcript append failed")?;
                 file.flush().context("transcript flush failed")?;
                 file.sync_all().context("transcript fsync failed")?;
+                written = Some(msg_id);
                 Ok(())
             });
         if let Err(error) = result {
@@ -201,6 +207,7 @@ impl TranscriptWriter {
                 "transcript.append degraded; conversation continues"
             );
         }
+        written
     }
 }
 
@@ -263,7 +270,9 @@ mod tests {
             fixed_clock("2026-11-04"),
         );
         writer.record_user("你好");
-        writer.record_assistant("你好，有什么事直接说就行。");
+        let anchor = writer
+            .record_assistant("你好，有什么事直接说就行。")
+            .expect("assistant line is traceable");
         assert_eq!(writer.dropped_records(), 0);
         let content =
             std::fs::read_to_string(dir.path().join("2026-11-04.jsonl")).expect("transcript");
@@ -279,6 +288,11 @@ mod tests {
         let second: serde_json::Value = serde_json::from_str(lines[1]).expect("json");
         assert_eq!(second["role"], "assistant");
         assert_eq!(second["turn_no"], 1, "assistant keeps the user turn number");
+        assert_eq!(
+            second["msg_id"].as_str(),
+            Some(anchor.as_str()),
+            "the returned anchor is the appended line's msg_id"
+        );
     }
 
     #[test]

@@ -20,7 +20,9 @@ pub mod tools;
 /// One real agent turn with the dual projection and profile tools wired in:
 /// the runtime's capability-driven entry point, called with the product's
 /// generation snapshot and the projection memory adapter supplied through
-/// `AgentRunOverrides`. This is the M2 hookup seam — no runtime file changes.
+/// `AgentRunOverrides`. This is the M2 hookup seam: the CLI path needs no
+/// runtime change; the WebSocket path uses the additive supplied-capabilities
+/// constructor instead of a parallel agent implementation.
 pub async fn begin_turn_turn(
     config: zeroclaw_config::schema::Config,
     capabilities: zeroclaw_runtime::composition::RuntimeCapabilities,

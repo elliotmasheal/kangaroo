@@ -7,7 +7,9 @@
 //! questionnaire adapter (outer layer — see `intake.rs`); afterwards each
 //! stdin line is one agent turn with the dual projection injected through
 //! the memory adapter and the profile tools supplied through the ToolSource
-//! seam. No `zeroclaw-runtime` source file is involved.
+//! seam. The only runtime edits are the two additive host seams (the
+//! supplied-capabilities constructor and the gateway's turn-capability
+//! provider); no parallel gateway or agent rewrite.
 
 mod consolidate;
 mod intake;
@@ -20,8 +22,12 @@ use std::sync::Arc;
 use zeroclaw_log::{Action, Event, EventOutcome, record};
 use zeroclaw_runtime::agent::loop_::AgentRunOverrides;
 use zeroclaw_runtime::composition::RuntimeCapabilities;
+use zeroclaw_super_agent::application::orchestration::{
+    dispatch_directive, watchdog, AssignmentBoard, Router,
+};
 use zeroclaw_super_agent::application::profile_service::ProfileService;
 use zeroclaw_super_agent::application::self_service::SelfService;
+use zeroclaw_super_agent::domain::orchestration::DEFAULT_WATCHDOG_THRESHOLD_MS;
 use zeroclaw_super_agent::infra::paths;
 use zeroclaw_super_agent::infra::profile_memory::ProfileMemoryAdapter;
 use zeroclaw_super_agent::infra::transcript::{
@@ -126,7 +132,7 @@ async fn main() -> Result<()> {
         Arc::clone(&clock),
         Arc::new(zeroclaw_super_agent::domain::selfhood::negotiation::ValidationPolicy),
     ));
-    let profile_service = Arc::new(ProfileService::new(profile_store, clock));
+    let profile_service = Arc::new(ProfileService::new(profile_store, Arc::clone(&clock)));
 
     // First run: the questionnaire adapter assembles the draft and commits
     // it through the core use case. An abandoned questionnaire writes
@@ -219,9 +225,31 @@ async fn main() -> Result<()> {
         });
     }
 
+    // M3 orchestration (minimal closure): the deterministic Router opens the
+    // decision, the in-memory board supervises worker-bound turns, and the
+    // watchdog runs at each turn boundary. Worker execution itself stays on
+    // the runtime's spawn_subagent/delegate tools — this layer only routes,
+    // records, and reports.
+    let router = Router::new();
+    let board = AssignmentBoard::new();
+    let watchdog_minutes = (DEFAULT_WATCHDOG_THRESHOLD_MS / 60_000).to_string();
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
     loop {
+        // Trigger (turn-boundary form until the daemon owns an interval):
+        // report once per stalled assignment, never silently retry it.
+        for assignment in watchdog::tick_with_default_threshold(&board, clock.now_ms()) {
+            println!(
+                "{}",
+                zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                    "cli-assignment-attention",
+                    &[
+                        ("minutes", &watchdog_minutes),
+                        ("id", &assignment.id),
+                    ]
+                )
+            );
+        }
         prompt("\n> ");
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
@@ -232,6 +260,14 @@ async fn main() -> Result<()> {
             InputAction::Quit => break,
             InputAction::Message(message) => {
                 transcript.record_user(&message);
+                let ticket = router.route(&message);
+                let assignment = board.dispatch(&ticket, clock.now_ms());
+                // The journal keeps the user's own words; the dispatch
+                // directive only shapes the turn the agent runs.
+                let turn_message = match dispatch_directive(&ticket) {
+                    Some(directive) => format!("{directive}\n\n{message}"),
+                    None => message,
+                };
                 let overrides = AgentRunOverrides {
                     memory: Some(Arc::clone(&adapter) as Arc<dyn zeroclaw_memory::Memory>),
                     suppress_memory_auto_save: true,
@@ -241,15 +277,26 @@ async fn main() -> Result<()> {
                     config.clone(),
                     capabilities.clone(),
                     agent_alias,
-                    message,
+                    turn_message,
                     overrides,
                 )
                 .await
                 {
                     // The runtime's CLI channel already streams the response
-                    // text to stdout; the full reply is journaled here.
-                    Ok(response) => transcript.record_assistant(&response),
-                    Err(error) => println!("error: {error:#}"),
+                    // text to stdout; the full reply is journaled here and its
+                    // trace anchor settles the assignment.
+                    Ok(response) => {
+                        let anchor = transcript.record_assistant(&response);
+                        if let Some(id) = assignment {
+                            board.settle(&id, anchor);
+                        }
+                    }
+                    Err(error) => {
+                        println!("error: {error:#}");
+                        if let Some(id) = assignment {
+                            board.settle(&id, None);
+                        }
+                    }
                 }
             }
         }

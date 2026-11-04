@@ -21,6 +21,10 @@ const DOMAIN_SOURCES: &[(&str, &str)] = &[
         "domain/amendment/mod.rs",
         include_str!("../src/domain/amendment/mod.rs"),
     ),
+    (
+        "domain/orchestration.rs",
+        include_str!("../src/domain/orchestration.rs"),
+    ),
 ];
 
 /// Technical concerns that must never appear in domain source: persistence
