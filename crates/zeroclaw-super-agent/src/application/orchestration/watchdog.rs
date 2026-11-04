@@ -6,8 +6,8 @@
 use zeroclaw_log::{Action, Event, EventOutcome, record};
 
 use crate::application::orchestration::AssignmentBoard;
-use crate::domain::orchestration::{Assignment, DEFAULT_WATCHDOG_THRESHOLD_MS};
 use crate::domain::TimestampMs;
+use crate::domain::orchestration::{Assignment, DEFAULT_WATCHDOG_THRESHOLD_MS};
 
 /// One tick. Returns the assignments that just crossed the threshold and had
 /// not raised attention before; an empty vector means nothing to report.

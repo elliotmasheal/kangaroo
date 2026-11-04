@@ -835,6 +835,22 @@ pub struct HostTurnCapabilities {
     /// consolidation for the connection — the host owns that decision, the
     /// gateway never rebuilds a config-backed handle behind its back.
     pub consolidation_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
+    /// The host's per-turn lifecycle observer (seam C). `None` keeps the
+    /// gateway turn exactly as before the seam existed: no host callbacks.
+    pub turn_lifecycle: Option<Arc<dyn TurnLifecycle>>,
+}
+
+/// Host-side observation of a WebSocket turn's boundaries (seam C). The
+/// product journal, decision routing and assignment bookkeeping are host
+/// concerns; the gateway only reports the facts. Callbacks run on the
+/// connection's turn task and must not block — the host is responsible for
+/// keeping them cheap.
+pub trait TurnLifecycle: Send + Sync {
+    /// A user message passed validation and its turn is about to run.
+    fn turn_started(&self, user_text: &str);
+    /// The turn ended. `reply` is the agent's final text on success; `None`
+    /// means the turn failed or was cancelled.
+    fn turn_finished(&self, user_text: &str, reply: Option<&str>);
 }
 
 /// Decides, per WS connection, whether the host supplies the turn's

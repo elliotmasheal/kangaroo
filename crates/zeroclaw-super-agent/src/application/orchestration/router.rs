@@ -3,7 +3,7 @@
 //! it. Slow-path (small-model) classification stays off by default (pending
 //! decision #1): an unmatched message is `Inline`.
 
-use crate::domain::orchestration::{route, RouteRule, Ticket, DEFAULT_ROUTE_RULES};
+use crate::domain::orchestration::{DEFAULT_ROUTE_RULES, RouteRule, Ticket, route};
 
 pub struct Router {
     rules: &'static [RouteRule],
@@ -43,10 +43,7 @@ mod tests {
             router.route("帮我实现这个功能").intent,
             TicketIntent::Delegate
         );
-        assert_eq!(
-            router.route("查一下").intent,
-            TicketIntent::FocusedSubtask
-        );
+        assert_eq!(router.route("查一下").intent, TicketIntent::FocusedSubtask);
         assert_eq!(router.route("你好").intent, TicketIntent::Inline);
     }
 

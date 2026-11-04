@@ -338,21 +338,19 @@ async fn resolve_ws_memory_handle(
         .map(Some)
 }
 
-/// The end-of-turn consolidation memory for one WS connection (seam B): a
-/// host-installed capability provider owns the handle outright — its
+/// The end-of-turn consolidation memory for one WS connection (seam B): the
+/// host-resolved capability set owns the handle outright — its
 /// `consolidation_memory` (possibly `None`, disabling consolidation) is
-/// returned as-is. With no provider (or a provider that declines this
-/// connection) the config-backed resolution runs exactly as before the
+/// returned as-is. With no host set (absent provider, or one that declines
+/// this connection) the config-backed resolution runs exactly as before the
 /// seam existed.
 async fn resolve_ws_turn_memory(
-    turn_capabilities: Option<&crate::TurnCapabilityProvider>,
+    host_turn: Option<&crate::HostTurnCapabilities>,
     config: &zeroclaw_config::schema::Config,
     agent_alias: &str,
 ) -> anyhow::Result<Option<Arc<dyn zeroclaw_memory::Memory>>> {
-    if let Some(provider) = turn_capabilities {
-        if let Some(host) = provider() {
-            return Ok(host.consolidation_memory);
-        }
+    if let Some(host) = host_turn {
+        return Ok(host.consolidation_memory.clone());
     }
     resolve_ws_memory_handle(config, agent_alias).await
 }
@@ -518,24 +516,33 @@ async fn handle_socket(
     // construction is deferred until after the optional `connect` frame so the
     // client can provide a per-session cwd for the security sandbox root.
     let config = state.config.read().clone();
-    let ws_memory =
-        match resolve_ws_turn_memory(state.turn_capabilities.as_ref(), &config, &agent_alias).await
-        {
-            Ok(memory) => memory,
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "agent": &agent_alias,
-                            "error": format!("{e:#}"),
-                        })),
-                    "WS per-agent memory resolution failed; consolidation disabled for connection"
-                );
-                None
-            }
-        };
+    // Seams A/B/C resolve the host's per-connection set exactly once: the
+    // memory handle, the agent construction and the turn lifecycle must all
+    // see the same host object, otherwise a host that keeps per-connection
+    // state (e.g. the active assignment) would observe a split copy.
+    let host_turn = state
+        .turn_capabilities
+        .as_ref()
+        .and_then(|provider| provider());
+    let turn_lifecycle = host_turn
+        .as_ref()
+        .and_then(|host| host.turn_lifecycle.clone());
+    let ws_memory = match resolve_ws_turn_memory(host_turn.as_ref(), &config, &agent_alias).await {
+        Ok(memory) => memory,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "agent": &agent_alias,
+                        "error": format!("{e:#}"),
+                    })),
+                "WS per-agent memory resolution failed; consolidation disabled for connection"
+            );
+            None
+        }
+    };
     let mut resumed = false;
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
@@ -718,11 +725,7 @@ async fn handle_socket(
     // Seam A: a host-installed provider replaces the WS agent's capability
     // sources for this connection. `None` (no provider, or it declines) runs
     // the config-backed construction exactly as before the seam existed.
-    let agent_init = match state
-        .turn_capabilities
-        .as_ref()
-        .and_then(|provider| provider())
-    {
+    let agent_init = match host_turn {
         Some(host) => {
             zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_supplied_capabilities(
                 state.config.clone(),
@@ -893,7 +896,10 @@ async fn handle_socket(
                                 return;
                             }
                         };
-                        let client_gone = process_chat_message(
+                        if let Some(lifecycle) = turn_lifecycle.as_ref() {
+                            lifecycle.turn_started(&content);
+                        }
+                        let completion = process_chat_message(
                             &state,
                             &mut agent,
                             &mut sender,
@@ -909,7 +915,10 @@ async fn handle_socket(
                             auth_subject.as_deref(),
                         )
                         .await;
-                        if client_gone {
+                        if let Some(lifecycle) = turn_lifecycle.as_ref() {
+                            lifecycle.turn_finished(&content, completion.reply.as_deref());
+                        }
+                        if completion.client_gone {
                             return;
                         }
                     }
@@ -1088,7 +1097,10 @@ async fn handle_socket(
                     }
                 };
 
-                let client_gone = process_chat_message(
+                if let Some(lifecycle) = turn_lifecycle.as_ref() {
+                    lifecycle.turn_started(&content);
+                }
+                let completion = process_chat_message(
                     &state,
                     &mut agent,
                     &mut sender,
@@ -1104,7 +1116,10 @@ async fn handle_socket(
                     auth_subject.as_deref(),
                 )
                 .await;
-                if client_gone {
+                if let Some(lifecycle) = turn_lifecycle.as_ref() {
+                    lifecycle.turn_finished(&content, completion.reply.as_deref());
+                }
+                if completion.client_gone {
                     break;
                 }
             }
@@ -1859,12 +1874,21 @@ fn build_done_frame_json(
     done
 }
 
+/// What the connection loop needs after one WS turn: whether the client went
+/// away mid-turn, and the agent's final reply for the host lifecycle seam
+/// (`None` on failure or cancellation).
+struct TurnCompletion {
+    client_gone: bool,
+    reply: Option<String>,
+}
+
 /// Process a single chat message through the agent and send the response.
 /// Uses [`Agent::turn_streamed`] so that intermediate text chunks, tool calls,
 /// and tool results are forwarded to the WebSocket client in real time.
 ///
-/// Returns `true` when the client went away mid-turn. The turn still ran to
-/// completion and was persisted; the caller should stop servicing the socket.
+/// The returned `client_gone` is `true` when the client went away mid-turn.
+/// The turn still ran to completion and was persisted; the caller should stop
+/// servicing the socket.
 #[allow(clippy::too_many_arguments)]
 async fn process_chat_message(
     state: &AppState,
@@ -1884,7 +1908,7 @@ async fn process_chat_message(
     // Transport-authenticated approval subject (paired-token hash), threaded so a
     // mid-turn SOP approval frame carries the same identity as the top-level path.
     auth_subject: Option<&str>,
-) -> bool {
+) -> TurnCompletion {
     use futures_util::StreamExt as _;
     use zeroclaw_runtime::agent::TurnEvent;
 
@@ -1913,7 +1937,10 @@ async fn process_chat_message(
                     "code": "SESSION_RESTORE_UNAVAILABLE"
                 });
                 let _ = sender.send(Message::Text(err.to_string().into())).await;
-                return false;
+                return TurnCompletion {
+                    client_gone: false,
+                    reply: None,
+                };
             }
         }
     }
@@ -2352,11 +2379,16 @@ async fn process_chat_message(
             "gateway_ws_turn"
         );
 
-        return client_gone;
+        return TurnCompletion {
+            client_gone,
+            reply: None,
+        };
     }
 
+    let mut reply = None;
     match result {
         Ok(outcome) => {
+            reply = Some(outcome.response.clone());
             if let Some(ref backend) = state.session_backend {
                 persist_agent_conversation_state(backend.as_ref(), session_key, agent);
                 *persisted_watermark =
@@ -2581,7 +2613,7 @@ async fn process_chat_message(
         }
     }
 
-    client_gone
+    TurnCompletion { client_gone, reply }
 }
 
 /// Serialize a failed turn for the WebSocket boundary without letting a
@@ -5816,13 +5848,15 @@ data: {{\"type\":\"message_stop\"}}\n\n"
             ..Default::default()
         };
         config.memory.backend = "none".to_string();
-        config.agents.insert(
-            "web".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                ..Default::default()
-            },
-        );
+        let mut agent = zeroclaw_config::schema::AliasedAgentConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        // Keep the fixture's config path memory-free: the seam tests that assert
+        // "no consolidation" must not get a SQLite handle from the default
+        // per-agent backend.
+        agent.memory.backend = zeroclaw_config::multi_agent::MemoryBackendKind::None;
+        config.agents.insert("web".to_string(), agent);
         config
     }
 
@@ -5839,13 +5873,12 @@ data: {{\"type\":\"message_stop\"}}\n\n"
                 .expect("markdown memory backend"),
         );
         let expected = host_memory.clone();
-        let provider: crate::TurnCapabilityProvider = Arc::new(move || {
-            Some(crate::HostTurnCapabilities {
-                capabilities: seam_test_capabilities(),
-                consolidation_memory: Some(expected.clone()),
-            })
-        });
-        let resolved = resolve_ws_turn_memory(Some(&provider), &config, "web")
+        let host = crate::HostTurnCapabilities {
+            capabilities: seam_test_capabilities(),
+            consolidation_memory: Some(expected.clone()),
+            turn_lifecycle: None,
+        };
+        let resolved = resolve_ws_turn_memory(Some(&host), &config, "web")
             .await
             .expect("host handle resolves");
         let resolved = resolved.expect("host supplied a handle");
@@ -5862,13 +5895,12 @@ data: {{\"type\":\"message_stop\"}}\n\n"
     async fn seam_b_host_none_disables_consolidation() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = seam_test_config(&tmp);
-        let provider: crate::TurnCapabilityProvider = Arc::new(|| {
-            Some(crate::HostTurnCapabilities {
-                capabilities: seam_test_capabilities(),
-                consolidation_memory: None,
-            })
-        });
-        let resolved = resolve_ws_turn_memory(Some(&provider), &config, "web")
+        let host = crate::HostTurnCapabilities {
+            capabilities: seam_test_capabilities(),
+            consolidation_memory: None,
+            turn_lifecycle: None,
+        };
+        let resolved = resolve_ws_turn_memory(Some(&host), &config, "web")
             .await
             .expect("host decision resolves");
         assert!(resolved.is_none(), "host None means no consolidation");
@@ -5890,9 +5922,9 @@ data: {{\"type\":\"message_stop\"}}\n\n"
             without_provider.is_none() && direct.is_none(),
             "default path must match the config resolution (both None here)"
         );
-        // A provider that declines this connection behaves identically.
-        let declining: crate::TurnCapabilityProvider = Arc::new(|| None);
-        let declined = resolve_ws_turn_memory(Some(&declining), &config, "web")
+        // A declined host set behaves identically: callers pass `None` when the
+        // provider is absent or returns `None`, so the config path runs.
+        let declined = resolve_ws_turn_memory(None, &config, "web")
             .await
             .expect("declined provider falls back");
         assert!(declined.is_none(), "declined provider uses config path");
@@ -5908,6 +5940,7 @@ data: {{\"type\":\"message_stop\"}}\n\n"
             Some(crate::HostTurnCapabilities {
                 capabilities: seam_test_capabilities(),
                 consolidation_memory: None,
+                turn_lifecycle: None,
             })
         })))
         .await;
@@ -5919,6 +5952,67 @@ data: {{\"type\":\"message_stop\"}}\n\n"
         );
         fixture.release_next();
         fixture.wait_for_turn_to_settle("gw_seam-a-turn").await;
+        fixture.shutdown();
+    }
+
+    /// Seam C: the host lifecycle observes both boundaries of a real WS turn
+    /// — the validated user text at the start and the final reply at the end.
+    #[tokio::test]
+    async fn seam_c_host_lifecycle_sees_both_turn_boundaries() {
+        #[derive(Default)]
+        struct Recording {
+            started: std::sync::Mutex<Vec<String>>,
+            finished: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        }
+        impl crate::TurnLifecycle for Recording {
+            fn turn_started(&self, user_text: &str) {
+                self.started
+                    .lock()
+                    .expect("started lock")
+                    .push(user_text.to_owned());
+            }
+            fn turn_finished(&self, user_text: &str, reply: Option<&str>) {
+                self.finished
+                    .lock()
+                    .expect("finished lock")
+                    .push((user_text.to_owned(), reply.map(str::to_owned)));
+            }
+        }
+        let recording = Arc::new(Recording::default());
+        let host_recording = Arc::clone(&recording);
+        let mut fixture =
+            ParkedTurnFixture::spawn_with_turn_capabilities(Some(Arc::new(move || {
+                let lifecycle: Arc<dyn crate::TurnLifecycle> = host_recording.clone();
+                Some(crate::HostTurnCapabilities {
+                    capabilities: seam_test_capabilities(),
+                    consolidation_memory: None,
+                    turn_lifecycle: Some(lifecycle),
+                })
+            })))
+            .await;
+        let (mut client, _) = fixture.connect("seam-c-turn").await;
+        fixture.start_parked_turn(&mut client, "hello").await;
+        fixture.release_next();
+        fixture.wait_for_turn_to_settle("gw_seam-c-turn").await;
+        // The finished callback runs on the connection task after the turn
+        // settles, so allow it a moment to land.
+        for _ in 0..50 {
+            if recording.finished.lock().expect("finished lock").len() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let started = recording.started.lock().expect("started lock");
+        let finished = recording.finished.lock().expect("finished lock");
+        assert_eq!(started.len(), 1, "one start callback per turn");
+        assert_eq!(started[0], "hello", "the host sees the validated user text");
+        assert_eq!(finished.len(), 1, "one finish callback per turn");
+        assert_eq!(finished[0].0, "hello");
+        assert_eq!(
+            finished[0].1.as_deref(),
+            Some(PARKED_TURN_RESPONSE),
+            "the host sees the final reply"
+        );
         fixture.shutdown();
     }
 }

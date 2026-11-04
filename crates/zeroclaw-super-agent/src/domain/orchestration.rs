@@ -327,7 +327,10 @@ mod tests {
 
     #[test]
     fn the_default_table_routes_heavy_work_to_a_worker() {
-        let ticket = route("帮我实现登录功能，顺便研究一下现有鉴权", DEFAULT_ROUTE_RULES);
+        let ticket = route(
+            "帮我实现登录功能，顺便研究一下现有鉴权",
+            DEFAULT_ROUTE_RULES,
+        );
         assert_eq!(
             ticket.intent,
             TicketIntent::Delegate,

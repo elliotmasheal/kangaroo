@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::domain::orchestration::{stall_verdict, Assignment, StallVerdict, Ticket};
 use crate::domain::TimestampMs;
+use crate::domain::orchestration::{Assignment, StallVerdict, Ticket, stall_verdict};
 
 #[derive(Default)]
 struct BoardState {
@@ -59,11 +59,7 @@ impl AssignmentBoard {
     /// Every non-settled assignment that has crossed the stall threshold and
     /// has not raised attention yet; marking happens here so the same
     /// assignment raises at most one attention.
-    pub fn due_attention(
-        &self,
-        now_ms: TimestampMs,
-        threshold_ms: TimestampMs,
-    ) -> Vec<Assignment> {
+    pub fn due_attention(&self, now_ms: TimestampMs, threshold_ms: TimestampMs) -> Vec<Assignment> {
         let mut state = self.lock();
         let mut due = Vec::new();
         for assignment in state.assignments.values_mut() {

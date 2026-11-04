@@ -25,7 +25,7 @@ use zeroclaw_api::observability_traits::{Observer, ObserverEvent, ObserverMetric
 use zeroclaw_runtime::agent::loop_::AgentRunOverrides;
 use zeroclaw_runtime::composition::RuntimeCapabilities;
 use zeroclaw_super_agent::application::orchestration::{
-    dispatch_directive, watchdog, AssignmentBoard, Router,
+    AssignmentBoard, Router, dispatch_directive, watchdog,
 };
 use zeroclaw_super_agent::application::profile_service::ProfileService;
 use zeroclaw_super_agent::application::self_service::SelfService;
@@ -276,10 +276,7 @@ async fn main() -> Result<()> {
                 "{}",
                 zeroclaw_runtime::i18n::get_required_cli_string_with_args(
                     "cli-assignment-attention",
-                    &[
-                        ("minutes", &watchdog_minutes),
-                        ("id", &assignment.id),
-                    ]
+                    &[("minutes", &watchdog_minutes), ("id", &assignment.id),]
                 )
             );
         }
