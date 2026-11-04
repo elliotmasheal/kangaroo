@@ -59,7 +59,11 @@ async fn main() -> Result<()> {
         )
     );
 
-    let config = zeroclaw_config::schema::Config::load_or_init().await?;
+    let mut config = zeroclaw_config::schema::Config::load_or_init().await?;
+    // Hard constraint: the resolved config may only address ~/.kangaroo; any
+    // surviving .zeroclaw reference (bootstrap default, env, operator entry)
+    // fails startup instead of falling back to ZeroClaw state.
+    paths::assert_startup_isolation(&config, &root)?;
     let self_store = zeroclaw_super_agent::infra::markdown_self_store(&root)?;
     let profile_store = zeroclaw_super_agent::infra::markdown_profile_store(&root)?;
     let negotiation_log = zeroclaw_super_agent::infra::jsonl_negotiation_log(&root)?;
@@ -110,6 +114,24 @@ async fn main() -> Result<()> {
         Arc::clone(&profile_service),
     ));
 
+    // The agent alias must exist in the canonical config (`agents` map).
+    // The product contract (RFC draft) will pin a dedicated [agents.kangaroo]
+    // section in the saved config; until then the bin assembles it in memory
+    // from the schema default so a fresh install can run at all. The default
+    // agent references a named risk profile, which is assembled alongside it.
+    let agent_alias = "kangaroo";
+    let agent = config
+        .agents
+        .entry(agent_alias.to_owned())
+        .or_insert_with(zeroclaw_config::schema::AliasedAgentConfig::default);
+    // The default agent's risk_profile ref is empty ("no preference"), but
+    // turn resolution requires a named entry; point it at the profile the
+    // bin assembles alongside it.
+    agent.risk_profile = zeroclaw_config::providers::RiskProfileRef::new(agent_alias);
+    config
+        .risk_profiles
+        .entry(agent_alias.to_owned())
+        .or_insert_with(zeroclaw_config::schema::RiskProfileConfig::default);
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
     loop {
@@ -133,7 +155,7 @@ async fn main() -> Result<()> {
         match zeroclaw_super_agent::begin_turn_turn(
             config.clone(),
             capabilities.clone(),
-            "kangaroo",
+            agent_alias,
             message,
             overrides,
         )
