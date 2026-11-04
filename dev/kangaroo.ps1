@@ -1,4 +1,4 @@
-# 一键启动袋鼠（Kangaroo）。
+﻿# 一键启动袋鼠（Kangaroo）。
 # 用法：在 PowerShell 里执行  .\dev\kangaroo.ps1
 #       .\dev\kangaroo.ps1 -Full     # 显示完整编译输出（含被折叠的上游警告）
 # 首次运行会走 5 题身份初始化；之后每次启动直接进入对话；:quit 退出。
@@ -108,7 +108,11 @@ try {
         Write-Host "[袋鼠] 二进制已是最新，直接启动……" -ForegroundColor DarkGray
     } else {
         # 源码有变更：编译。输出策略——错误完整、上游警告折叠、自身警告保留。
-        Write-Host "[袋鼠] 检测到源码比二进制新，正在编译……"
+        if (Test-Path $exe) {
+            Write-Host "[袋鼠] 检测到源码有变更，正在增量编译……"
+        } else {
+            Write-Host "[袋鼠] 首次运行需要完整编译，大约 5-10 分钟，请稍候……"
+        }
     $ErrorActionPreference = "Continue"
     function Invoke-FilteredBuild {
         $out = & cargo build --jobs 2 -p zeroclaw-super-agent --bin kangaroo 2>&1 |
@@ -177,6 +181,10 @@ try {
     }
 
     $runCode = Invoke-Kangaroo
+    if ($runCode -eq 0) {
+        Write-Host ""
+        Write-Host "[袋鼠] 对话已结束。下次双击 袋鼠.cmd 就能继续。"
+    }
     exit $runCode
 } catch {
     Fail $_.Exception.Message
