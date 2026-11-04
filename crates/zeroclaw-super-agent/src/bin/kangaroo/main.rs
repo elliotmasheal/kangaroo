@@ -161,7 +161,9 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            Ok(response) => println!("{response}"),
+            // The runtime's CLI channel already streams the response text to
+            // stdout; printing it here duplicated every reply.
+            Ok(_) => {}
             Err(error) => println!("error: {error:#}"),
         }
     }
