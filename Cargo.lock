@@ -14540,6 +14540,7 @@ dependencies = [
  "zeroclaw-api",
  "zeroclaw-config",
  "zeroclaw-eval",
+ "zeroclaw-gateway",
  "zeroclaw-log",
  "zeroclaw-memory",
  "zeroclaw-providers",
