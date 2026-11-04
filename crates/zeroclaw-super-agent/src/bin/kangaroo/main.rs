@@ -17,6 +17,7 @@ use chrono::Local;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
+use zeroclaw_log::{Action, Event, EventOutcome, record};
 use zeroclaw_runtime::agent::loop_::AgentRunOverrides;
 use zeroclaw_runtime::composition::RuntimeCapabilities;
 use zeroclaw_super_agent::application::profile_service::ProfileService;
@@ -180,6 +181,44 @@ async fn main() -> Result<()> {
     // The agent alias must exist in the canonical config (`agents` map);
     // see `assemble_product_agent` for why this happens in the bin itself.
     assemble_product_agent(&mut config, agent_alias);
+
+    // Daemon-semantics consolidation trigger (memory design, Phase B): on
+    // startup, a stale last-success plus pending journal lines starts ONE
+    // background pass. The conversation loop is never blocked; a failure is
+    // logged and left for the next launch (no in-session retry). Until the
+    // daemon exists, this bin is the thin trigger — the service it calls is
+    // the same `run_pass` the daemon scheduler will reuse.
+    let consolidation_cursor_path = zeroclaw_super_agent::infra::episodes::cursor_path(&root);
+    let consolidation_cursor =
+        zeroclaw_super_agent::infra::episodes::load_cursor(&consolidation_cursor_path)?
+            .unwrap_or_default();
+    if zeroclaw_super_agent::infra::consolidation::auto_trigger_due(&root, &consolidation_cursor)? {
+        println!("{}", cli("cli-consolidate-started"));
+        let bg_root = root.clone();
+        let bg_config = config.clone();
+        zeroclaw_spawn::spawn!(async move {
+            match zeroclaw_super_agent::infra::consolidation::run_pass(&bg_root, &bg_config).await {
+                Ok(summary) => println!(
+                    "{}",
+                    zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                        "cli-consolidate-auto-done",
+                        &[
+                            ("episodes", &summary.episodes.to_string()),
+                            ("hypotheses", &summary.hypotheses.to_string()),
+                        ]
+                    )
+                ),
+                Err(error) => record!(
+                    WARN,
+                    Event::new(module_path!(), Action::Note)
+                        .with_outcome(EventOutcome::Failure)
+                        .with_attrs(serde_json::json!({ "error": format!("{error:#}") })),
+                    "auto consolidation failed; left for next launch"
+                ),
+            }
+        });
+    }
+
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
     loop {

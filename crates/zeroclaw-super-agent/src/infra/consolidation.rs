@@ -9,7 +9,10 @@
 //!     hypotheses per pass.
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use std::collections::{HashMap, HashSet};
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
 
 use crate::infra::episodes::{EpisodeRecord, EpisodeTrace};
 use crate::infra::transcript::TranscriptEntry;
@@ -34,10 +37,20 @@ pub struct CandidateLine {
     pub text: String,
 }
 
-/// One proposal parsed from the summarizer reply.
+/// One proposal parsed from the summarizer reply. `record=false` marks a
+/// candidate the summarizer judged not worth keeping (a normal decision,
+/// not a failure) — the reason travels with it for the audit trail.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LlmProposal {
+    #[serde(default = "default_record_true")]
+    pub record: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// `record=false` vetoes carry no text (the prompt's schema omits it);
+    /// the field is only written for recorded winners.
+    #[serde(default)]
     pub text: String,
+    #[serde(default)]
     pub kind: String,
     pub anchor_msg_id: String,
     #[serde(default)]
@@ -46,9 +59,16 @@ pub struct LlmProposal {
     pub conflicts: bool,
 }
 
+fn default_record_true() -> bool {
+    true
+}
+
 #[derive(Debug, Default)]
 pub struct SelectionOutcome {
     pub winners: Vec<EpisodeRecord>,
+    /// Proposals the summarizer judged not worth recording (the quality
+    /// veto) — a normal outcome, never counted as a failure.
+    pub filtered_not_worth: usize,
     pub rejected_no_trace: usize,
     pub rejected_covered: usize,
     pub rejected_invalid_kind: usize,
@@ -120,6 +140,12 @@ pub fn select_winners(
         .chain(proposals.iter().filter(|proposal| !proposal.conflicts));
 
     for proposal in ordered {
+        if !proposal.record {
+            // The quality veto: the summarizer decided this candidate is not
+            // worth remembering. Normal decision — audit it, never a failure.
+            outcome.filtered_not_worth += 1;
+            continue;
+        }
         let Some((line, ts)) = anchors.get(&proposal.anchor_msg_id) else {
             outcome.rejected_no_trace += 1;
             continue;
@@ -191,11 +217,21 @@ pub fn build_prompt(candidates: &[CandidateLine], existing: &[EpisodeRecord]) ->
     let mut prompt = String::new();
     prompt
         .push_str("你是记忆整理器。把下面的对话流水提炼成情节（episode）与假设（hypothesis）。\n");
-    prompt.push_str("规则：\n");
-    prompt.push_str("1. 每条必须引用恰好一个 msg_id 作为 anchor_msg_id，且必须来自下面的流水；\n");
+    prompt.push_str("\n唯一判据：日后翻出来，对理解“这个人”（用户）或“这段关系”是否有用。没有用就不要记录——哪怕一条都不产出也是正确结果。条数上限是天花板，不是目标，绝不凑数。\n");
+    prompt.push_str("\n不予记录（硬否决，必须 record=false 并给一句 reason）：\n");
+    prompt.push_str("- 寒暄、问候、告别；\n");
+    prompt.push_str("- 会话流程（“先聊到这”“下次再说”之类）；\n");
+    prompt.push_str("- 关于助手自身的内容（工具调用成败、内部状态、记忆写入是否成功）；\n");
+    prompt.push_str("- 纯礼貌性表达（谢谢/好的/辛苦）。\n");
+    prompt.push_str("\n规则：\n");
+    prompt.push_str(
+        "1. record=true 的每条必须引用恰好一个 msg_id 作为 anchor_msg_id，且必须来自下面的流水；\n",
+    );
     prompt.push_str("2. conflicts=true 仅当该条与既有情节矛盾或推翻既有情节；\n");
     prompt.push_str("3. hypothesis 是猜测，未确认；confidence 用 0-100；\n");
-    prompt.push_str("4. 只输出 JSON 数组，元素形如 {\"text\":\"...\",\"kind\":\"episode|hypothesis\",\"anchor_msg_id\":\"...\",\"confidence\":80,\"conflicts\":false}；最多 12 条，宁缺毋滥。\n");
+    prompt.push_str("4. 对判断为不予记录的候选，输出 {\"record\": false, \"reason\": \"一句话理由\", \"anchor_msg_id\": \"...\"}；\n");
+    prompt.push_str("5. record=true 的输出形如 {\"record\": true, \"text\": \"...\", \"kind\": \"episode|hypothesis\", \"anchor_msg_id\": \"...\", \"confidence\": 80, \"conflicts\": false}；\n");
+    prompt.push_str("6. 只输出 JSON 数组，最多 12 条（含 record=false 的）。\n");
     if existing.is_empty() {
         prompt.push_str("既有情节：（空）\n");
     } else {
@@ -214,6 +250,372 @@ pub fn build_prompt(candidates: &[CandidateLine], existing: &[EpisodeRecord]) ->
         ));
     }
     prompt
+}
+
+// ── Shared consolidation service (Phase B) ──────────────────────────
+//
+// One implementation consumed by every trigger surface: the CLI
+// `consolidate` subcommand today, the daemon's scheduler once it exists.
+// The CLI adapter must stay thin — orchestration lives here.
+
+use crate::infra::episodes::{
+    ConsolidationCursor, EpisodeStore, cursor_path, episodes_path, load_cursor, save_cursor,
+};
+use crate::infra::transcript::{parse_entry, transcripts_dir};
+use zeroclaw_api::model_provider::{ChatMessage, ChatRequest};
+
+/// LLM call budget for one pass (the user's decision: over budget means
+/// stop, cursor stays, the next pass catches up).
+pub const MAX_LLM_CALLS_PER_PASS: u32 = 4;
+/// Auto-trigger freshness threshold: consolidate in the background at
+/// startup when the last successful pass is older than this many hours.
+pub const AUTO_TRIGGER_MIN_HOURS: i64 = 20;
+/// A consolidation lock older than this is stale (a crashed run) and may
+/// be stolen by a new pass.
+const LOCK_STALE_MINUTES: i64 = 60;
+
+/// Best-effort exclusive lock so a manual pass and the auto-trigger (or
+/// two processes) never double-append episodes. A lock left behind by a
+/// crashed run is stolen after it goes stale.
+pub struct ConsolidationLock {
+    path: PathBuf,
+    owned: bool,
+}
+
+impl ConsolidationLock {
+    /// `Ok(None)` means another pass holds a fresh lock.
+    pub fn acquire(dir: &Path) -> Result<Option<Self>> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("lock dir create failed: {}", dir.display()))?;
+        let path = dir.join("consolidation.lock");
+        if path.exists() {
+            let recorded = std::fs::read_to_string(&path).unwrap_or_default();
+            let stale = chrono::DateTime::parse_from_rfc3339(recorded.trim())
+                .map(|then| {
+                    Local::now() - then.with_timezone(&Local)
+                        > chrono::Duration::minutes(LOCK_STALE_MINUTES)
+                })
+                .unwrap_or(true);
+            if !stale {
+                return Ok(None);
+            }
+        }
+        let stamp = Local::now().to_rfc3339();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("lock create failed: {}", path.display()))?;
+        writeln!(file, "{stamp}").ok();
+        Ok(Some(Self { path, owned: true }))
+    }
+}
+
+impl Drop for ConsolidationLock {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The outcome of one pass; the trigger surface renders it.
+#[derive(Debug, Default)]
+pub struct RunSummary {
+    pub already_running: bool,
+    pub windows: usize,
+    pub llm_calls: u32,
+    pub episodes: usize,
+    pub hypotheses: usize,
+    pub audited: usize,
+    /// Candidates the summarizer vetoed with `record=false` — a normal
+    /// quality decision, never counted as a failure or a rejection.
+    pub filtered_not_worth: usize,
+    pub cursor: ConsolidationCursor,
+}
+
+/// Whether the journal still holds unprocessed lines after the cursor.
+fn pending_lines(root: &Path, cursor: &ConsolidationCursor) -> Result<bool> {
+    let transcript_dir = transcripts_dir(root);
+    let Ok(entries) = std::fs::read_dir(&transcript_dir) else {
+        return Ok(false);
+    };
+    let mut day_files: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    day_files.sort();
+    let start_index = if cursor.file.is_empty() {
+        0
+    } else {
+        match day_files.iter().position(|name| name == &cursor.file) {
+            Some(position) => position,
+            None => return Ok(true),
+        }
+    };
+    for (index, name) in day_files.iter().enumerate().skip(start_index) {
+        let total = std::fs::read_to_string(transcript_dir.join(name))
+            .map(|raw| raw.lines().count() as u64)
+            .unwrap_or(0);
+        let offset = if index == start_index && name == &cursor.file {
+            cursor.line_offset.min(total)
+        } else {
+            0
+        };
+        if offset < total {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The auto-trigger's gate: a stale last success AND journal lines waiting.
+/// No recorded success means "never consolidated" — stale by definition.
+pub fn auto_trigger_due(root: &Path, cursor: &ConsolidationCursor) -> Result<bool> {
+    let stale = match &cursor.last_success_at {
+        Some(stamp) => chrono::DateTime::parse_from_rfc3339(stamp)
+            .map(|then| {
+                Local::now() - then.with_timezone(&Local)
+                    > chrono::Duration::hours(AUTO_TRIGGER_MIN_HOURS)
+            })
+            .unwrap_or(true),
+        None => true,
+    };
+    Ok(stale && pending_lines(root, cursor)?)
+}
+
+/// Pick the oldest day file with unprocessed raw lines after the cursor.
+fn pick_window(
+    day_files: &[String],
+    transcript_dir: &Path,
+    cursor: &ConsolidationCursor,
+) -> Result<Option<(String, Vec<String>, u64)>> {
+    let start_index = if cursor.file.is_empty() {
+        0
+    } else {
+        day_files
+            .iter()
+            .position(|name| name == &cursor.file)
+            .with_context(|| format!("cursor file {} not in transcripts", cursor.file))?
+    };
+    for (index, name) in day_files.iter().enumerate().skip(start_index) {
+        let raw = std::fs::read_to_string(transcript_dir.join(name))
+            .with_context(|| format!("transcript read failed: {name}"))?;
+        let total = raw.lines().count() as u64;
+        let offset = if index == start_index && name == &cursor.file {
+            cursor.line_offset.min(total)
+        } else {
+            0
+        };
+        if offset < total {
+            return Ok(Some((
+                name.clone(),
+                raw.lines().map(str::to_owned).collect(),
+                offset,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn advance_cursor(
+    cursor: &mut ConsolidationCursor,
+    cursor_file: &Path,
+    day_files: &[String],
+    current_file: &str,
+    last_processed_raw_line: Option<u64>,
+    total_raw_lines: usize,
+) -> Result<()> {
+    let exhausted = last_processed_raw_line
+        .map(|line| line >= total_raw_lines as u64)
+        .unwrap_or(true);
+    *cursor = if exhausted {
+        let next = day_files
+            .iter()
+            .position(|name| name == current_file)
+            .and_then(|position| day_files.get(position + 1))
+            .cloned();
+        match next {
+            Some(next_file) => ConsolidationCursor {
+                file: next_file,
+                line_offset: 0,
+                last_success_at: cursor.last_success_at.clone(),
+            },
+            None => ConsolidationCursor {
+                file: current_file.to_owned(),
+                line_offset: total_raw_lines as u64,
+                last_success_at: cursor.last_success_at.clone(),
+            },
+        }
+    } else {
+        ConsolidationCursor {
+            file: current_file.to_owned(),
+            line_offset: last_processed_raw_line.expect("line present when not exhausted"),
+            last_success_at: cursor.last_success_at.clone(),
+        }
+    };
+    save_cursor(cursor_file, cursor)
+}
+
+/// One shared consolidation pass. Acquires the lock, processes up to
+/// [`MAX_LLM_CALLS_PER_PASS`] windows, stamps `last_success_at` on a clean
+/// exit, and releases the lock. The trigger surface (CLI subcommand, daemon
+/// scheduler, startup auto-trigger) renders the summary.
+pub async fn run_pass(root: &Path, config: &zeroclaw_config::schema::Config) -> Result<RunSummary> {
+    let data_dir = root.join("config").join("data");
+    let Some(_lock) = ConsolidationLock::acquire(&data_dir)? else {
+        return Ok(RunSummary {
+            already_running: true,
+            ..Default::default()
+        });
+    };
+    let provider_ref = config
+        .agents
+        .get("kangaroo")
+        .map(|agent| agent.model_provider.to_string())
+        .filter(|reference| !reference.is_empty())
+        .context("consolidation needs [agents.kangaroo].model_provider")?;
+    let transcript_dir = transcripts_dir(root);
+    let store = EpisodeStore::new(episodes_path(root));
+    let cursor_file = cursor_path(root);
+    let mut cursor = load_cursor(&cursor_file)?.unwrap_or_default();
+
+    let mut day_files: Vec<String> = std::fs::read_dir(&transcript_dir)
+        .with_context(|| format!("transcripts dir read failed: {}", transcript_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    day_files.sort();
+
+    let mut covered = store.covered_msg_ids()?;
+    let mut summary = RunSummary {
+        cursor: cursor.clone(),
+        ..Default::default()
+    };
+
+    while summary.llm_calls < MAX_LLM_CALLS_PER_PASS {
+        let Some((file_name, raw_lines, offset)) =
+            pick_window(&day_files, &transcript_dir, &cursor)?
+        else {
+            break;
+        };
+        let parsed: Vec<(u64, crate::infra::transcript::TranscriptEntry)> = raw_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .filter_map(|(index, line)| {
+                // Trace lines are 1-based over the raw file, matching the
+                // episodes layer contract (see episodes::EpisodeTrace).
+                parse_entry(line)
+                    .ok()
+                    .map(|entry| (index as u64 + 1, entry))
+            })
+            .collect();
+        let remaining: Vec<(u64, _)> = parsed
+            .iter()
+            .filter(|(index, _)| *index >= offset)
+            .cloned()
+            .collect();
+        if remaining.is_empty() {
+            advance_cursor(
+                &mut cursor,
+                &cursor_file,
+                &day_files,
+                &file_name,
+                None,
+                raw_lines.len(),
+            )?;
+            continue;
+        }
+        let (window, _end_line) = window_slice(&remaining, 0);
+        let candidates = candidate_lines(&file_name, &window);
+        let uncovered = candidates
+            .iter()
+            .filter(|candidate| !covered.contains(&candidate.msg_id))
+            .count();
+        if uncovered == 0 {
+            // Audited skip: every anchor in this window already has an
+            // episode; advance the cursor without spending an LLM call.
+            summary.audited += candidates.len();
+            advance_cursor(
+                &mut cursor,
+                &cursor_file,
+                &day_files,
+                &file_name,
+                window.last().map(|(index, _)| *index),
+                raw_lines.len(),
+            )?;
+            continue;
+        }
+        let anchors: std::collections::HashMap<String, (u64, String)> = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.msg_id.clone(),
+                    (candidate.line, candidate.ts.clone()),
+                )
+            })
+            .collect();
+        let existing = store.load_all()?;
+        let prompt = build_prompt(&candidates, &existing);
+
+        let resolved =
+            zeroclaw_providers::create_model_provider_from_ref_with_model(config, &provider_ref)?;
+        let model = resolved
+            .model
+            .clone()
+            .context("provider alias carries no model for consolidation")?;
+        let reply = resolved
+            .provider
+            .chat(
+                ChatRequest {
+                    messages: &[ChatMessage::user(prompt)],
+                    tools: None,
+                    thinking: None,
+                },
+                &model,
+                Some(0.2),
+            )
+            .await
+            .context("consolidation LLM call failed")?;
+        summary.llm_calls += 1;
+
+        let proposals = parse_proposals(reply.text_or_empty())?;
+        let outcome = select_winners(&proposals, &file_name, &anchors, &covered);
+        for winner in &outcome.winners {
+            covered.insert(winner.trace.msg_id.clone());
+        }
+        summary.episodes += outcome
+            .winners
+            .iter()
+            .filter(|w| w.kind == "episode")
+            .count();
+        summary.hypotheses += outcome
+            .winners
+            .iter()
+            .filter(|w| w.kind == "hypothesis")
+            .count();
+        summary.filtered_not_worth += outcome.filtered_not_worth;
+        store.append(&outcome.winners)?;
+        advance_cursor(
+            &mut cursor,
+            &cursor_file,
+            &day_files,
+            &file_name,
+            window.last().map(|(index, _)| *index),
+            raw_lines.len(),
+        )?;
+        summary.windows += 1;
+    }
+
+    // A clean exit (even budget-limited or zero-output) stamps success.
+    cursor.last_success_at = Some(Local::now().to_rfc3339());
+    save_cursor(&cursor_file, &cursor)?;
+    summary.cursor = cursor.clone();
+    Ok(summary)
 }
 
 /// The window slice of a day file: from `offset` (0-based), at most
@@ -256,6 +658,8 @@ mod tests {
 
     fn proposal(text: &str, anchor: &str, conflicts: bool) -> LlmProposal {
         LlmProposal {
+            record: true,
+            reason: None,
             text: text.to_owned(),
             kind: "episode".to_owned(),
             anchor_msg_id: anchor.to_owned(),
@@ -319,6 +723,8 @@ mod tests {
             proposal("regular5", "m5", false),
             proposal("conflict", "m5", true),
             LlmProposal {
+                record: true,
+                reason: None,
                 text: "guess".to_owned(),
                 kind: "hypothesis".to_owned(),
                 anchor_msg_id: "m6".to_owned(),
@@ -328,6 +734,8 @@ mod tests {
             proposal("orphan", "missing", false),
             proposal("covered", "m2", false),
             LlmProposal {
+                record: true,
+                reason: None,
                 text: "bad".to_owned(),
                 kind: "nonsense".to_owned(),
                 anchor_msg_id: "m1".to_owned(),
@@ -424,5 +832,90 @@ mod tests {
         let (window, end) = window_slice(&big, 0);
         assert_eq!(window.len(), WINDOW_MAX_LINES);
         assert_eq!(end, WINDOW_MAX_LINES);
+    }
+
+    #[test]
+    fn record_false_is_a_quality_veto_not_a_rejection() {
+        let entries = [(1u64, entry("m1", "user", "先聊到这，下次再说").1)];
+        let anchors: HashMap<String, (u64, String)> = entries
+            .iter()
+            .map(|(line, e)| (e.msg_id.clone(), (*line, e.ts.clone())))
+            .collect();
+        let proposals = vec![
+            LlmProposal {
+                record: false,
+                reason: Some("会话流程".to_owned()),
+                text: "用户表示今天先聊到这里".to_owned(),
+                kind: "episode".to_owned(),
+                anchor_msg_id: "m1".to_owned(),
+                confidence: 60,
+                conflicts: false,
+            },
+            proposal("真实情节", "m1", false),
+        ];
+        let outcome = select_winners(&proposals, "day.jsonl", &anchors, &HashSet::new());
+        assert_eq!(outcome.winners.len(), 1, "only the recorded proposal wins");
+        assert_eq!(outcome.filtered_not_worth, 1);
+        assert_eq!(outcome.rejected_no_trace, 0);
+        assert_eq!(outcome.rejected_covered, 0);
+        assert_eq!(outcome.rejected_invalid_kind, 0);
+    }
+
+    #[test]
+    fn consolidation_lock_is_exclusive_and_stale_locks_are_stolen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ConsolidationLock::acquire(dir.path()).expect("acquire");
+        assert!(first.is_some(), "a fresh directory yields the lock");
+        let second = ConsolidationLock::acquire(dir.path()).expect("second acquire");
+        assert!(second.is_none(), "a held lock blocks a second pass");
+        drop(first);
+        let third = ConsolidationLock::acquire(dir.path()).expect("third acquire");
+        assert!(third.is_some(), "a released lock is reusable");
+        // A lock left behind by a crashed run is stolen once stale.
+        let stamp = (Local::now() - chrono::Duration::minutes(LOCK_STALE_MINUTES + 1)).to_rfc3339();
+        std::fs::write(dir.path().join("consolidation.lock"), stamp).expect("stale stamp");
+        let fourth = ConsolidationLock::acquire(dir.path()).expect("fourth acquire");
+        assert!(fourth.is_some(), "a stale lock is stealable");
+    }
+
+    #[test]
+    fn auto_trigger_fires_only_when_stale_and_pending() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let transcript_dir = transcripts_dir(root);
+        std::fs::create_dir_all(&transcript_dir).expect("transcripts dir");
+        std::fs::write(
+            transcript_dir.join("2026-11-04.jsonl"),
+            r#"{"ts":"2026-11-04T12:00:00+08:00","role":"user","text":"你好","session_id":"s","msg_id":"m1","turn_no":1,"model":null}"#,
+        )
+        .expect("transcript file");
+        let fresh = ConsolidationCursor {
+            file: String::new(),
+            line_offset: 0,
+            last_success_at: Some((Local::now() - chrono::Duration::hours(2)).to_rfc3339()),
+        };
+        let stale = ConsolidationCursor {
+            file: String::new(),
+            line_offset: 0,
+            last_success_at: Some((Local::now() - chrono::Duration::hours(25)).to_rfc3339()),
+        };
+        assert!(
+            !auto_trigger_due(root, &fresh).expect("fresh gate"),
+            "a 2h-old success is fresh"
+        );
+        assert!(
+            auto_trigger_due(root, &stale).expect("stale gate"),
+            "a 25h-old success with pending lines fires"
+        );
+        assert!(
+            auto_trigger_due(root, &ConsolidationCursor::default()).expect("never gate"),
+            "no recorded success is stale by definition"
+        );
+        // Nothing pending → never fires, no matter how stale the stamp is.
+        let empty = tempfile::tempdir().expect("empty tempdir");
+        assert!(
+            !auto_trigger_due(empty.path(), &stale).expect("empty gate"),
+            "no journal means no trigger"
+        );
     }
 }

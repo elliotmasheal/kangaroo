@@ -14531,6 +14531,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cap-std",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
@@ -14541,7 +14542,9 @@ dependencies = [
  "zeroclaw-eval",
  "zeroclaw-log",
  "zeroclaw-memory",
+ "zeroclaw-providers",
  "zeroclaw-runtime",
+ "zeroclaw-spawn",
 ]
 
 [[package]]

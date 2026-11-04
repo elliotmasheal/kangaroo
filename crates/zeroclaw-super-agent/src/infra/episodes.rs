@@ -50,10 +50,14 @@ pub struct EpisodeRecord {
 /// How far the nightly consolidation has processed: the transcript file
 /// name and the 0-based line offset within it. A crash or a failed pass
 /// leaves the cursor where the last fully-written window ended.
+/// `last_success_at` stamps the last pass that completed without error
+/// (RFC 3339) — the auto-trigger's "stale?" input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ConsolidationCursor {
     pub file: String,
     pub line_offset: u64,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
 }
 
 pub fn load_cursor(path: &Path) -> Result<Option<ConsolidationCursor>> {
@@ -92,13 +96,23 @@ impl EpisodeStore {
         let raw = std::fs::read_to_string(&self.path)
             .with_context(|| format!("episodes read failed: {}", self.path.display()))?;
         let mut records = Vec::new();
+        let line_count = raw.lines().count();
         for (index, line) in raw.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: EpisodeRecord = serde_json::from_str(line)
-                .with_context(|| format!("episodes line {} parse failed", index + 1))?;
-            records.push(record);
+            // A parse failure on the LAST line of a file that does not end
+            // with a newline is a torn write from a kill mid-append —
+            // tolerate it. Anywhere else it is real corruption and surfaces.
+            let torn_tail = index + 1 == line_count && !raw.ends_with('\n');
+            match serde_json::from_str::<EpisodeRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(_) if torn_tail => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("episodes line {} parse failed", index + 1));
+                }
+            }
         }
         Ok(records)
     }
@@ -170,6 +184,7 @@ mod tests {
             &ConsolidationCursor {
                 file: "2026-11-04.jsonl".to_owned(),
                 line_offset: 7,
+                last_success_at: None,
             },
         )
         .expect("save");
@@ -204,5 +219,35 @@ mod tests {
         assert!(episodes_path(root).starts_with(root));
         assert!(cursor_path(root).starts_with(root));
         assert!(!episodes_path(root).to_string_lossy().contains(".zeroclaw"));
+    }
+
+    #[test]
+    fn a_torn_tail_line_is_tolerated_but_mid_file_corruption_surfaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(EPISODES_FILE_NAME);
+        let line1 = serde_json::to_string(&record("m1", "episode", 1)).expect("json");
+        let line2 = serde_json::to_string(&record("m2", "episode", 2)).expect("json");
+        // No trailing newline, so the last line is a candidate torn write —
+        // but it parses, so it is kept.
+        std::fs::write(&path, format!("{line1}\n{line2}")).expect("write");
+        let store = EpisodeStore::new(path.clone());
+        assert_eq!(store.load_all().expect("load").len(), 2);
+        // A torn LAST line (truncated JSON, no trailing newline) is the
+        // kill-mid-append signature: tolerated, earlier records intact.
+        std::fs::write(&path, format!("{line1}\n{line2}\n{{\"trace\":{{\"fil"))
+            .expect("torn write");
+        assert_eq!(
+            store.load_all().expect("load").len(),
+            2,
+            "torn tail tolerated"
+        );
+        // Corruption NOT at the tail is real corruption and must surface.
+        let line3 = serde_json::to_string(&record("m3", "episode", 3)).expect("json");
+        std::fs::write(&path, format!("{line1}\n{{\"trace\":{{\"fil\"\n{line3}"))
+            .expect("mid corruption");
+        assert!(
+            store.load_all().is_err(),
+            "mid-file corruption surfaces as an error"
+        );
     }
 }

@@ -184,11 +184,10 @@ impl TranscriptWriter {
             if !self.user_notified.swap(true, Ordering::Relaxed) {
                 // First failure in this session: surface the loss on the
                 // terminal in the user's language, once, then stay quiet.
-                let error_text = format!("{error:#}");
-                let notice = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
-                    "cli-transcript-write-failed",
-                    &[("error", &error_text)],
-                );
+                // The raw OS error belongs to the WARN log only — the user
+                // gets a plain-language explanation instead.
+                let notice =
+                    zeroclaw_runtime::i18n::get_required_cli_string("cli-transcript-write-failed");
                 eprintln!("{notice}");
             }
             record!(

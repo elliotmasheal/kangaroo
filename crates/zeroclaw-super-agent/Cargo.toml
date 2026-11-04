@@ -19,6 +19,7 @@ dev-self-amendment = []
 # code is consumed or modified.
 zeroclaw-runtime.workspace = true
 zeroclaw-log.workspace = true
+zeroclaw-spawn.workspace = true
 zeroclaw-api.workspace = true
 zeroclaw-config.workspace = true
 zeroclaw-memory.workspace = true
