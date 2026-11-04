@@ -23,6 +23,25 @@ use zeroclaw_super_agent::infra::paths;
 use zeroclaw_super_agent::infra::profile_memory::ProfileMemoryAdapter;
 use zeroclaw_super_agent::tools::ProfileToolsSource;
 
+/// The product's agent contract in the canonical config: the `kangaroo`
+/// alias must exist and name a risk profile the turn resolver can find.
+/// Fresh installs carry neither section; both are assembled in memory (the
+/// saved-config RFC will pin them later). Every entry point runs this bin,
+/// so a bare exe, the launcher, and a future WebUI launch all get the same
+/// defaults without depending on any script-injected state.
+fn assemble_product_agent(config: &mut zeroclaw_config::schema::Config, agent_alias: &str) {
+    let agent = config.agents.entry(agent_alias.to_owned()).or_default();
+    // An alias present on disk may still carry the empty ("no preference")
+    // ref the schema default uses; turn resolution requires a named entry,
+    // so the ref is pointed at the profile assembled alongside it. A config
+    // that exists but lacks fields is not a reason to fail the turn.
+    agent.risk_profile = zeroclaw_config::providers::RiskProfileRef::new(agent_alias);
+    config
+        .risk_profiles
+        .entry(agent_alias.to_owned())
+        .or_default();
+}
+
 fn prompt(text: &str) {
     print!("{text}");
     let _ = std::io::stdout().flush();
@@ -114,24 +133,10 @@ async fn main() -> Result<()> {
         Arc::clone(&profile_service),
     ));
 
-    // The agent alias must exist in the canonical config (`agents` map).
-    // The product contract (RFC draft) will pin a dedicated [agents.kangaroo]
-    // section in the saved config; until then the bin assembles it in memory
-    // from the schema default so a fresh install can run at all. The default
-    // agent references a named risk profile, which is assembled alongside it.
+    // The agent alias must exist in the canonical config (`agents` map);
+    // see `assemble_product_agent` for why this happens in the bin itself.
     let agent_alias = "kangaroo";
-    let agent = config
-        .agents
-        .entry(agent_alias.to_owned())
-        .or_insert_with(zeroclaw_config::schema::AliasedAgentConfig::default);
-    // The default agent's risk_profile ref is empty ("no preference"), but
-    // turn resolution requires a named entry; point it at the profile the
-    // bin assembles alongside it.
-    agent.risk_profile = zeroclaw_config::providers::RiskProfileRef::new(agent_alias);
-    config
-        .risk_profiles
-        .entry(agent_alias.to_owned())
-        .or_insert_with(zeroclaw_config::schema::RiskProfileConfig::default);
+    assemble_product_agent(&mut config, agent_alias);
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
     loop {
@@ -168,4 +173,38 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bare-exe regression: a config without any `[agents.*]` or
+    /// `risk_profiles` section (what a fresh install loads) must still admit
+    /// a turn after the in-memory assembly, without script-injected state.
+    #[test]
+    fn a_minimal_config_gets_the_product_agent_and_named_risk_profile() {
+        let mut config = zeroclaw_config::schema::Config::default();
+        assert!(!config.agents.contains_key("kangaroo"));
+        assert!(config.risk_profiles.is_empty());
+        assemble_product_agent(&mut config, "kangaroo");
+        let agent = config.agents.get("kangaroo").expect("agent assembled");
+        assert_eq!(agent.risk_profile.as_str(), "kangaroo");
+        assert!(config.risk_profiles.contains_key("kangaroo"));
+    }
+
+    /// A config that exists on disk but predates a named risk_profile ref
+    /// (empty "no preference" ref) must be upgraded in memory, not fail.
+    #[test]
+    fn an_existing_agent_entry_is_upgraded_to_a_named_risk_profile() {
+        let mut config = zeroclaw_config::schema::Config::default();
+        let agent = zeroclaw_config::schema::AliasedAgentConfig {
+            risk_profile: zeroclaw_config::providers::RiskProfileRef::new(""),
+            ..Default::default()
+        };
+        config.agents.insert("kangaroo".to_owned(), agent);
+        assemble_product_agent(&mut config, "kangaroo");
+        assert_eq!(config.agents["kangaroo"].risk_profile.as_str(), "kangaroo");
+        assert!(config.risk_profiles.contains_key("kangaroo"));
+    }
 }
