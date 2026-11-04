@@ -1369,6 +1369,7 @@ cli-intake-q-assumption = 最初の仮定として扱ってほしい付き合い
 cli-intake-abandoned = インタビューを中断しました。何も書き込んでいません。再実行で最初からやり直せます。
 cli-intake-required = この質問は必須です。これがないと初期化できません。
 cli-intake-done = アイデンティティを初期化しました（リビジョン {$revision}）。こんにちは、話せます。
+cli-turn-acknowledged = 了解しました。これはワーカーに任せます。結果は根拠付きで報告します。
 cli-kangaroo-chat-ready = チャット準備完了。メッセージを入力してください。:quit で終了。
 cli-transcript-write-failed = この会話の一部をジャーナルに保存できませんでした。ディスク容量不足かフォルダ使用中の可能性があります。この部分は後から参照できません。
 cli-consolidate-summary = 整理完了：{$windows} ウィンドウ、LLM 呼び出し {$llm_calls} 回。エピソード {$episodes} 件、仮説 {$hypotheses} 件を追加。整理済み {$audited} 件と記録不要と判断 {$not_worth} 件をスキップ。カーソルは {$cursor_file} の {$cursor_offset} 行目。

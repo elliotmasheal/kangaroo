@@ -12,15 +12,16 @@
 //! provider); no parallel gateway or agent rewrite.
 
 mod consolidate;
+mod daemon;
 mod intake;
 mod serve;
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use zeroclaw_log::{Action, Event, EventOutcome, record};
+use zeroclaw_api::observability_traits::{Observer, ObserverEvent, ObserverMetric};
 use zeroclaw_runtime::agent::loop_::AgentRunOverrides;
 use zeroclaw_runtime::composition::RuntimeCapabilities;
 use zeroclaw_super_agent::application::orchestration::{
@@ -85,6 +86,57 @@ fn prompt(text: &str) {
 
 fn cli(key: &str) -> String {
     zeroclaw_runtime::i18n::get_required_cli_string(key)
+}
+
+/// Bridges the runtime's tool-call events to the assignment board: the first
+/// worker execution observed in the active turn moves its assignment from
+/// `Dispatched` to `Running`. The transcript observer still receives every
+/// event unchanged (it journals completed tool calls).
+struct WorkerProbe {
+    journal: TranscriptObserver,
+    active: Mutex<Option<String>>,
+    board: Arc<AssignmentBoard>,
+}
+
+impl WorkerProbe {
+    fn new(journal: TranscriptObserver, board: Arc<AssignmentBoard>) -> Self {
+        Self {
+            journal,
+            active: Mutex::new(None),
+            board,
+        }
+    }
+
+    /// Names the assignment the turn about to run belongs to; `None` clears.
+    fn set_active(&self, assignment: Option<String>) {
+        if let Ok(mut slot) = self.active.lock() {
+            *slot = assignment;
+        }
+    }
+}
+
+impl Observer for WorkerProbe {
+    fn record_event(&self, event: &ObserverEvent) {
+        if let ObserverEvent::ToolCallStart { tool, .. } = event
+            && matches!(tool.as_str(), "spawn_subagent" | "delegate")
+            && let Some(id) = self.active.lock().ok().and_then(|slot| slot.clone())
+        {
+            self.board.mark_running(&id);
+        }
+        self.journal.record_event(event);
+    }
+
+    fn record_metric(&self, metric: &ObserverMetric) {
+        self.journal.record_metric(metric);
+    }
+
+    fn name(&self) -> &str {
+        self.journal.name()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[tokio::main]
@@ -175,8 +227,12 @@ async fn main() -> Result<()> {
         session_id,
         model_ref,
     ));
-    let observer = Arc::new(TranscriptObserver::new(Arc::clone(&transcript)));
-    let mut capabilities = RuntimeCapabilities::config_backed_with_observer(observer);
+    let board = Arc::new(AssignmentBoard::new());
+    let probe = Arc::new(WorkerProbe::new(
+        TranscriptObserver::new(Arc::clone(&transcript)),
+        Arc::clone(&board),
+    ));
+    let mut capabilities = RuntimeCapabilities::config_backed_with_observer(probe.clone());
     capabilities.tools = Arc::new(ProfileToolsSource::wrapping(
         Arc::clone(&profile_service),
         zeroclaw_runtime::composition::defaults::native_compat_registry,
@@ -199,39 +255,9 @@ async fn main() -> Result<()> {
     // Daemon-semantics consolidation trigger (memory design, Phase B): on
     // startup, a stale last-success plus pending journal lines starts ONE
     // background pass. The conversation loop is never blocked; a failure is
-    // logged and left for the next launch (no in-session retry). Until the
-    // daemon exists, this bin is the thin trigger — the service it calls is
-    // the same `run_pass` the daemon scheduler will reuse.
-    let consolidation_cursor_path = zeroclaw_super_agent::infra::episodes::cursor_path(&root);
-    let consolidation_cursor =
-        zeroclaw_super_agent::infra::episodes::load_cursor(&consolidation_cursor_path)?
-            .unwrap_or_default();
-    if zeroclaw_super_agent::infra::consolidation::auto_trigger_due(&root, &consolidation_cursor)? {
-        println!("{}", cli("cli-consolidate-started"));
-        let bg_root = root.clone();
-        let bg_config = config.clone();
-        zeroclaw_spawn::spawn!(async move {
-            match zeroclaw_super_agent::infra::consolidation::run_pass(&bg_root, &bg_config).await {
-                Ok(summary) => println!(
-                    "{}",
-                    zeroclaw_runtime::i18n::get_required_cli_string_with_args(
-                        "cli-consolidate-auto-done",
-                        &[
-                            ("episodes", &summary.episodes.to_string()),
-                            ("hypotheses", &summary.hypotheses.to_string()),
-                        ]
-                    )
-                ),
-                Err(error) => record!(
-                    WARN,
-                    Event::new(module_path!(), Action::Note)
-                        .with_outcome(EventOutcome::Failure)
-                        .with_attrs(serde_json::json!({ "error": format!("{error:#}") })),
-                    "auto consolidation failed; left for next launch"
-                ),
-            }
-        });
-    }
+    // logged and left for the next launch (no in-session retry). The gate
+    // and the pass live in `daemon`, shared with the long-running host.
+    daemon::start_startup_catch_up(root.clone(), config.clone());
 
     // M3 orchestration (minimal closure): the deterministic Router opens the
     // decision, the in-memory board supervises worker-bound turns, and the
@@ -239,7 +265,6 @@ async fn main() -> Result<()> {
     // the runtime's spawn_subagent/delegate tools — this layer only routes,
     // records, and reports.
     let router = Router::new();
-    let board = AssignmentBoard::new();
     let watchdog_minutes = (DEFAULT_WATCHDOG_THRESHOLD_MS / 60_000).to_string();
     println!("{}", cli("cli-kangaroo-chat-ready"));
     let stdin = std::io::stdin();
@@ -270,6 +295,12 @@ async fn main() -> Result<()> {
                 transcript.record_user(&message);
                 let ticket = router.route(&message);
                 let assignment = board.dispatch(&ticket, clock.now_ms());
+                probe.set_active(assignment.clone());
+                // Outbox class `acknowledgement`: a worker-bound turn
+                // confirms receipt before the (slower) worker work starts.
+                if ticket.intent.needs_worker() {
+                    println!("{}", cli("cli-turn-acknowledged"));
+                }
                 // The journal keeps the user's own words; the dispatch
                 // directive only shapes the turn the agent runs.
                 let turn_message = match dispatch_directive(&ticket) {
@@ -306,6 +337,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                probe.set_active(None);
             }
         }
     }
@@ -315,6 +347,78 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroclaw_super_agent::domain::orchestration::{AssignmentStatus, Ticket, TicketIntent};
+
+    fn worker_tool_event(tool: &str) -> ObserverEvent {
+        ObserverEvent::ToolCallStart {
+            tool: tool.to_owned(),
+            tool_call_id: None,
+            arguments: None,
+            channel: None,
+            agent_alias: None,
+            parent_agent_alias: None,
+            turn_id: None,
+        }
+    }
+
+    fn board_with_delegate_ticket(
+        dir: &std::path::Path,
+    ) -> (Arc<AssignmentBoard>, Arc<WorkerProbe>, String) {
+        let writer = Arc::new(TranscriptWriter::new(
+            dir.to_path_buf(),
+            "test-session".to_owned(),
+            None,
+        ));
+        let board = Arc::new(AssignmentBoard::new());
+        let probe = Arc::new(WorkerProbe::new(
+            TranscriptObserver::new(writer),
+            Arc::clone(&board),
+        ));
+        let id = board
+            .dispatch(
+                &Ticket {
+                    intent: TicketIntent::Delegate,
+                    matched_phrase: None,
+                },
+                0,
+            )
+            .expect("worker ticket opens an assignment");
+        (board, probe, id)
+    }
+
+    /// The board transition the outline names: an observed worker tool call
+    /// moves the active assignment `Dispatched → Running`.
+    #[test]
+    fn an_observed_worker_tool_moves_the_assignment_to_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (board, probe, id) = board_with_delegate_ticket(dir.path());
+        probe.set_active(Some(id.clone()));
+        probe.record_event(&worker_tool_event("spawn_subagent"));
+        assert_eq!(
+            board.get(&id).expect("assignment present").status,
+            AssignmentStatus::Running
+        );
+    }
+
+    /// Only worker tools transition, and only for the active turn.
+    #[test]
+    fn non_worker_tools_and_idle_turns_leave_the_assignment_dispatched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (board, probe, id) = board_with_delegate_ticket(dir.path());
+        probe.set_active(Some(id.clone()));
+        probe.record_event(&worker_tool_event("shell"));
+        assert_eq!(
+            board.get(&id).expect("assignment present").status,
+            AssignmentStatus::Dispatched,
+            "a non-worker tool is not an assignment start"
+        );
+        probe.record_event(&worker_tool_event("spawn_subagent"));
+        assert_eq!(
+            board.get(&id).expect("assignment present").status,
+            AssignmentStatus::Running
+        );
+        probe.set_active(None);
+    }
 
     /// The bare-exe regression: a config without any `[agents.*]` or
     /// `risk_profiles` section (what a fresh install loads) must still admit

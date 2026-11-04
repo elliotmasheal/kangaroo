@@ -78,6 +78,11 @@ pub async fn run(
         })
     });
 
+    // Long-running host: the consolidation gate is re-checked on an interval
+    // instead of waiting for the next manual launch (D1). This starts with one
+    // catch-up attempt; the gateway loop below is never blocked by a pass.
+    crate::daemon::start_scheduler(root.to_path_buf(), config.clone());
+
     // The product's own port, never the installed ZeroClaw's 42617.
     let port = paths::DEFAULT_GATEWAY_PORT;
     config.gateway.port = port;

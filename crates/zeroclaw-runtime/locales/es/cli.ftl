@@ -1371,6 +1371,7 @@ cli-intake-q-assumption = ¿Alguna preferencia de trato que deba tomar como supo
 cli-intake-abandoned = Entrevista abandonada; no se escribio nada. Ejecutame de nuevo para empezar de cero.
 cli-intake-required = Esta pregunta es obligatoria: no puedo inicializarme sin ella.
 cli-intake-done = Identidad inicializada (revision {$revision}). Hola, ya puedo hablar.
+cli-turn-acknowledged = Entendido: esto va a un worker. Volvere con la evidencia.
 cli-kangaroo-chat-ready = Conversacion lista. Escribe un mensaje; :quit para salir.
 cli-transcript-write-failed = Una parte de esta conversacion no se pudo guardar en el diario, probablemente porque el disco esta lleno o la carpeta esta ocupada. Esa parte no quedara trazable.
 cli-consolidate-summary = Consolidacion terminada: {$windows} ventana(s), {$llm_calls} llamada(s) al LLM; {$episodes} episodio(s) y {$hypotheses} hipotesis escritos; {$audited} lineas ya consolidadas y {$not_worth} sin valor para recordar omitidas; cursor en {$cursor_file} linea {$cursor_offset}.

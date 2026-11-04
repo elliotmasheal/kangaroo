@@ -1374,6 +1374,7 @@ cli-intake-abandoned = 访谈已放弃；未写入任何内容。再次运行即
 cli-intake-required = 这一题必答——没有它我无法完成初始化。
 cli-intake-done = 身份初始化完成（修订 {$revision}）。你好，我可以开始说话了。
 cli-kangaroo-chat-ready = 对话就绪。输入消息即可；:quit 退出。
+cli-turn-acknowledged = 收到，这件事交给 worker 去做；结果出来我会带证据汇报。
 cli-transcript-write-failed = 有一段对话没能存下来，可能是磁盘满了或者目录被占用。这段之后没法回溯。
 cli-consolidate-summary = 整理完成：{$windows} 个窗口，LLM 调用 {$llm_calls} 次；新增情节 {$episodes} 条、假设 {$hypotheses} 条；跳过已整理 {$audited} 条、判定不予记录 {$not_worth} 条；游标停在 {$cursor_file} 第 {$cursor_offset} 行。
 cli-consolidate-budget-limited = 本轮 LLM 调用已达上限，剩余部分下次补做；未整理的流水不会被压缩或丢弃。
