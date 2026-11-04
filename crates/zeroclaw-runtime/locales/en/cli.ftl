@@ -1746,3 +1746,4 @@ cli-consolidate-started = Catching up on the journal left from last time — con
 cli-consolidate-already-running = A consolidation pass is already in progress; this one is skipped.
 cli-consolidate-auto-done = Background consolidation finished: {$episodes} episode(s) and {$hypotheses} hypothesis/hypotheses written.
 cli-assignment-attention = A task handed to a worker has been quiet for over {$minutes} minute(s) (assignment {$id}). I will not retry it silently: tell me to check on it or drop it.
+cli-kangaroo-serve-url = Kangaroo WebUI is listening at {$url} (upstream gateway routes; pair in the browser).

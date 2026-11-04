@@ -13,6 +13,7 @@
 
 mod consolidate;
 mod intake;
+mod serve;
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -150,6 +151,13 @@ async fn main() -> Result<()> {
                 &[("revision", &revision.to_string())]
             )
         );
+    }
+
+    // WebUI entry: the upstream gateway with the product's supplied
+    // capabilities. It reuses the services and the intake state above, so a
+    // first run completes the questionnaire before the server starts.
+    if std::env::args().nth(1).as_deref() == Some("serve") {
+        return serve::run(&root, config, self_service, profile_service).await;
     }
 
     // Capability generation: config-backed sources, the profile tools

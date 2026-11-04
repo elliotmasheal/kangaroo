@@ -1377,3 +1377,4 @@ cli-consolidate-started = 前回の残りをバックグラウンドで整理し
 cli-consolidate-already-running = 整理がすでに実行中のため、今回はスキップします。
 cli-consolidate-auto-done = バックグラウンド整理が完了：エピソード {$episodes} 件、仮説 {$hypotheses} 件を追加。
 cli-assignment-attention = ワーカーに渡したタスクが {$minutes} 分以上応答していません（割り当て {$id}）。黙って再試行はしません。確認するか破棄するか指示してください。
+cli-kangaroo-serve-url = Kangaroo WebUI は {$url} で起動しました（上流ゲートウェイのルートをそのまま使用。ブラウザでペアリングしてください）。

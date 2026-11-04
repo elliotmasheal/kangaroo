@@ -1346,6 +1346,50 @@ pub async fn run_gateway_with_authority(
     .await
 }
 
+/// Run the gateway with the live config authority owned by its daemon
+/// generation, plus a host-installed per-turn capability provider. This is
+/// the product-host form of [`run_gateway_with_authority`]: every other
+/// caller keeps the no-provider construction, so the config-backed WS agent
+/// path is unchanged.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn run_gateway_with_authority_and_turn_capabilities(
+    host: &str,
+    port: u16,
+    config: Config,
+    external_event_bus: Option<zeroclaw_runtime::observability::EventBus>,
+    reload_controls: Option<zeroclaw_runtime::daemon::GatewayReloadControls>,
+    tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
+    canvas_store: Option<CanvasStore>,
+    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
+    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    daemon_authority: Option<zeroclaw_runtime::daemon::DaemonInboundAuthority>,
+    sop_driver_handles: Option<zeroclaw_runtime::sop::SopDriverHandles>,
+    readiness: Option<zeroclaw_runtime::daemon::GatewayReadinessReporter>,
+    authority: zeroclaw_runtime::LiveConfigAuthority,
+    turn_capabilities: TurnCapabilityProvider,
+) -> Result<()> {
+    Box::pin(run_gateway_with_plugin_webhooks(
+        host,
+        port,
+        config,
+        external_event_bus,
+        reload_controls,
+        tui_registry,
+        canvas_store,
+        sop_engine,
+        sop_audit,
+        daemon_authority,
+        GatewaySupervision::new(
+            readiness,
+            Arc::new(zeroclaw_api::webhook::PluginWebhookRegistry::new()),
+            authority,
+            sop_driver_handles,
+        )
+        .with_turn_capabilities(turn_capabilities),
+    ))
+    .await
+}
+
 /// Run the supervised gateway with the daemon generation's channel-plugin
 /// webhook registry and live-config authority.
 #[allow(clippy::too_many_lines)]

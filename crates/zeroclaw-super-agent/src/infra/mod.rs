@@ -7,6 +7,7 @@ pub mod consolidation;
 pub mod doc_store;
 pub mod document;
 pub mod episodes;
+pub mod host;
 pub mod negotiation_log_jsonl;
 pub mod paths;
 pub mod profile_memory;

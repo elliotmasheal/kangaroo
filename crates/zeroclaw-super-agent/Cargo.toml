@@ -20,6 +20,7 @@ dev-self-amendment = []
 # the gateway's host-installed turn-capability provider). Downstream edits are
 # additive; no upstream PR and no parallel gateway rewrite.
 zeroclaw-runtime.workspace = true
+zeroclaw-gateway.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-spawn.workspace = true
 zeroclaw-api.workspace = true

@@ -1381,3 +1381,4 @@ cli-consolidate-started = 正在整理上次留下的记忆，写入情节层；
 cli-consolidate-already-running = 已有一次整理在进行，本次跳过。
 cli-consolidate-auto-done = 后台整理完成：新增情节 {$episodes} 条、假设 {$hypotheses} 条。
 cli-assignment-attention = 有一项交给 worker 的任务已经超过 {$minutes} 分钟没有回报（任务 {$id}）。我不会静默重试：告诉我继续查，还是放弃它。
+cli-kangaroo-serve-url = 袋鼠 WebUI 已在 {$url} 启动（沿用上游网关路由，在浏览器里完成配对）。

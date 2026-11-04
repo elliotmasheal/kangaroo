@@ -1382,3 +1382,4 @@ cli-consolidate-started = Consolidation en arriere-plan du journal laisse la der
 cli-consolidate-already-running = Une consolidation est deja en cours ; celle-ci est ignoree.
 cli-consolidate-auto-done = Consolidation en arriere-plan terminee : {$episodes} episode(s) et {$hypotheses} hypothese(s) ecrits.
 cli-assignment-attention = Une tache confiee a un worker ne repond plus depuis plus de {$minutes} minute(s) (affectation {$id}). Je ne la relancerai pas en silence : dis-moi si je dois la verifier ou l'abandonner.
+cli-kangaroo-serve-url = Kangaroo WebUI ecoute sur {$url} (routes du gateway original ; appairage dans le navigateur).
