@@ -1,28 +1,21 @@
 @echo off
-rem Kangaroo double-click launcher: hands off to dev\kangaroo.ps1.
-rem Keep every line BEFORE `chcp 65001` pure ASCII (cmd parses it with the
-rem OEM codepage first). This file must be saved as UTF-8 without BOM.
+setlocal
 chcp 65001 >nul
-rem From here on the file is read back as UTF-8, so Chinese text is safe.
-rem Process-level environment only; nothing below touches system variables.
+rem Kangaroo double-click launcher. Pure ASCII by policy: every byte must
+rem be 0x20-0x7E plus CRLF, because the cmd parser reads this file with the
+rem OEM codepage before any chcp takes effect and cannot handle bare LFs.
+rem All user-facing Chinese text lives in dev\kangaroo.ps1 (UTF-8 BOM).
 set "RUSTUP_HOME=D:\Scoop\persist\rustup\.rustup"
 set "CARGO_HOME=D:\Scoop\persist\rustup\.cargo"
 set "PATH=D:\Scoop\persist\rustup\.cargo\bin;%PATH%"
-rem Prefer PowerShell 7 (reads UTF-8 scripts without a BOM); fall back to
-rem Windows PowerShell 5.1, which needs the BOM the .ps1 carries.
+set "KANGAROO_SHELL=powershell"
 where pwsh >nul 2>nul
-if "%ERRORLEVEL%"=="0" (
-    set "KANGAROO_SHELL=pwsh"
-) else (
-    set "KANGAROO_SHELL=powershell"
-)
+if "%ERRORLEVEL%"=="0" set "KANGAROO_SHELL=pwsh"
 "%KANGAROO_SHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0dev\kangaroo.ps1" %*
 set "KANGAROO_EXIT_CODE=%ERRORLEVEL%"
-if not "%KANGAROO_EXIT_CODE%"=="0" (
-    echo.
-    echo [袋鼠] 启动过程没有走完，上面的信息说明了发生了什么、可以怎么办。
-)
-rem Keep the window open: a failure must stay readable, and the closing
-rem line after a normal conversation should not vanish instantly.
+rem Keep the window open: on a failure the Chinese diagnostics are already
+rem on screen from the PowerShell layer, and the closing line after a
+rem normal conversation should not vanish instantly.
 pause
+endlocal
 exit /b %KANGAROO_EXIT_CODE%
