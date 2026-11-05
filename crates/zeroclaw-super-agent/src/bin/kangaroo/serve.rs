@@ -21,6 +21,7 @@ use zeroclaw_super_agent::application::self_service::SelfService;
 use zeroclaw_super_agent::domain::orchestration::DEFAULT_WATCHDOG_THRESHOLD_MS;
 use zeroclaw_super_agent::infra::host::with_supplied_memory;
 use zeroclaw_super_agent::infra::paths;
+use zeroclaw_super_agent::infra::pending::PendingQueue;
 use zeroclaw_super_agent::infra::profile_memory::ProfileMemoryAdapter;
 use zeroclaw_super_agent::infra::transcript::{
     TranscriptObserver, TranscriptWriter, transcripts_dir,
@@ -115,6 +116,7 @@ pub async fn run(
     mut config: zeroclaw_config::schema::Config,
     self_service: Arc<SelfService>,
     profile_service: Arc<ProfileService>,
+    pending_queue: Arc<PendingQueue>,
 ) -> Result<()> {
     let agent_alias = "kangaroo";
     crate::assemble_product_agent(&mut config, agent_alias);
@@ -134,10 +136,13 @@ pub async fn run(
     ));
     let observer = Arc::new(TranscriptObserver::new(Arc::clone(&transcript)));
     let mut capabilities = RuntimeCapabilities::config_backed_with_observer(observer);
-    capabilities.tools = Arc::new(ProfileToolsSource::wrapping(
-        Arc::clone(&profile_service),
-        zeroclaw_runtime::composition::defaults::native_compat_registry,
-    ));
+    capabilities.tools = Arc::new(
+        ProfileToolsSource::wrapping(
+            Arc::clone(&profile_service),
+            zeroclaw_runtime::composition::defaults::native_compat_registry,
+        )
+        .with_pending_queue(Arc::clone(&pending_queue)),
+    );
     let real_memory = Arc::from(zeroclaw_memory::create_memory(
         &config.memory,
         &root.join("memory"),
@@ -179,7 +184,7 @@ pub async fn run(
     // Long-running host: the consolidation gate is re-checked on an interval
     // instead of waiting for the next manual launch (D1). This starts with one
     // catch-up attempt; the gateway loop below is never blocked by a pass.
-    crate::daemon::start_scheduler(root.to_path_buf(), config.clone());
+    crate::daemon::start_scheduler(root.to_path_buf(), config.clone(), profile_service);
 
     // The product's own port, never the installed ZeroClaw's 42617.
     let port = paths::DEFAULT_GATEWAY_PORT;

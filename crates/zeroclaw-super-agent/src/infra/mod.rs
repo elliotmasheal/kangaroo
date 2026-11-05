@@ -6,12 +6,15 @@ pub mod clock;
 pub mod consolidation;
 pub mod doc_store;
 pub mod document;
+pub mod dream_audit;
 pub mod episodes;
 pub mod host;
 pub mod negotiation_log_jsonl;
 pub mod paths;
+pub mod pending;
 pub mod profile_memory;
 pub mod profile_store;
+pub mod promotion;
 pub mod self_store;
 pub mod transcript;
 

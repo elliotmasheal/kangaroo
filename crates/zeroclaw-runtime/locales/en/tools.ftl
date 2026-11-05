@@ -275,5 +275,5 @@ tool-a2a-cancel-desc-peer = Configured peer name hosting the task.
 tool-a2a-cancel-desc-task-id = The task id to cancel.
 tool-a2a-cancel-desc-agent = Optional agent alias or tenant that created the task (from a2a_send). Helps route the cancel to the correct interface when discovery is re-run (the cached route is used first).
 
-tool-profile-update = Record observations about the user into the user profile. Each observation carries a section, a short key, the fact value, an observation kind, and a confidence. The profile decides what is worth recording; credentials, transient notes, and duplicates are refused.
+tool-profile-update = Record observations about the user into the user profile. Each observation carries a section, a short key, the fact value, an observation kind, and a confidence. The profile decides what is worth recording; credentials, transient notes, and duplicates are refused. Inferred observations (any kind other than correction) do not enter the profile directly: they are queued for the nightly consolidation pass, which adjudicates them against episode evidence before anything is recorded.
 tool-profile-rollback = Roll the user profile back to an earlier revision by revision number. The rollback itself is recorded as a new revision.

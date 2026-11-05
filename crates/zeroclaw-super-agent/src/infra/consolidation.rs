@@ -333,6 +333,10 @@ pub struct RunSummary {
     /// quality decision, never counted as a failure or a rejection.
     pub filtered_not_worth: usize,
     pub cursor: ConsolidationCursor,
+    /// The promotion stage's outcome (the dream's second phase: episodes and
+    /// queued inferences lifted into the profile through the narrowed upgrade
+    /// channel, memory design v2 §2.3/§3).
+    pub promotion: crate::infra::promotion::PromotionSummary,
 }
 
 /// Whether the journal still holds unprocessed lines after the cursor.
@@ -461,9 +465,16 @@ fn advance_cursor(
 
 /// One shared consolidation pass. Acquires the lock, processes up to
 /// [`MAX_LLM_CALLS_PER_PASS`] windows, stamps `last_success_at` on a clean
-/// exit, and releases the lock. The trigger surface (CLI subcommand, daemon
-/// scheduler, startup auto-trigger) renders the summary.
-pub async fn run_pass(root: &Path, config: &zeroclaw_config::schema::Config) -> Result<RunSummary> {
+/// exit, then runs the dream's promotion stage while still holding the lock,
+/// and releases the lock. The trigger surface (CLI subcommand, daemon
+/// scheduler, startup auto-trigger) renders the summary. A promotion failure
+/// does not roll back the episodes stage: its cursor is already durable, and
+/// the audit chain carries the failure (I-DR3).
+pub async fn run_pass(
+    root: &Path,
+    config: &zeroclaw_config::schema::Config,
+    profile_service: &crate::application::profile_service::ProfileService,
+) -> Result<RunSummary> {
     let data_dir = root.join("config").join("data");
     let Some(_lock) = ConsolidationLock::acquire(&data_dir)? else {
         return Ok(RunSummary {
@@ -615,6 +626,14 @@ pub async fn run_pass(root: &Path, config: &zeroclaw_config::schema::Config) -> 
     cursor.last_success_at = Some(Local::now().to_rfc3339());
     save_cursor(&cursor_file, &cursor)?;
     summary.cursor = cursor.clone();
+
+    // The dream's second phase: lift episodes and queued inferences into the
+    // profile through the narrowed upgrade channel. The consolidation cursor
+    // above is already saved, so a promotion failure never rolls back the
+    // episodes stage's work.
+    summary.promotion = crate::infra::promotion::run_promotion(root, config, profile_service)
+        .await
+        .context("dream promotion stage failed")?;
     Ok(summary)
 }
 

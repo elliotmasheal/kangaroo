@@ -8,7 +8,9 @@ use std::sync::Arc;
 use zeroclaw_log::{Action, Event, record};
 
 use crate::application::ports::{Clock, CommitReceipt, LoadedDoc, ProfileDocumentStore};
-use crate::domain::profile::{RecordingPlan, SectionKind, UserProfile};
+use crate::domain::profile::{
+    ChangeSource, FactPatch, PatchAction, RecordingPlan, SectionKind, UserProfile,
+};
 use crate::domain::{ChangeKind, RevisionId};
 
 /// Per-turn update budget (invariant I-U5). The budget is a policy input the
@@ -80,6 +82,60 @@ impl ProfileService {
             );
         }
         Ok(plan)
+    }
+
+    /// Retires inferred facts the dream's promotion stage found contradicted
+    /// (memory design v2 §2.2: retirement is the time-independent anti-drift
+    /// brake). Only facts currently sourced from `AgentInference` are
+    /// touched; user-sourced and absent targets are skipped, never counted.
+    /// The removals commit as one revision with the retired keys in the note.
+    pub fn retire_inferred_facts(
+        &self,
+        targets: &[(SectionKind, String)],
+        note: &str,
+    ) -> Result<usize> {
+        let loaded = self.store.load()?;
+        let mut state = loaded.state.clone().unwrap_or_default();
+        let now = self.clock.now_ms();
+        let patches: Vec<FactPatch> = targets
+            .iter()
+            .filter(|(section, key)| {
+                matches!(
+                    state.fact(*section, key).map(|fact| &fact.source),
+                    Some(ChangeSource::AgentInference { .. })
+                )
+            })
+            .map(|(section, key)| FactPatch {
+                section: *section,
+                key: key.clone(),
+                action: PatchAction::Remove,
+            })
+            .collect();
+        if patches.is_empty() {
+            return Ok(0);
+        }
+        let retired = patches.len();
+        let keys: Vec<String> = patches
+            .iter()
+            .map(|patch| format!("{}.{}", patch.section.as_str(), patch.key))
+            .collect();
+        state.apply_patches(&patches, now);
+        let receipt = self.store.commit(
+            loaded.fingerprint,
+            &state,
+            ChangeKind::Experience,
+            &format!("{note}; retired inferred facts: {}", keys.join(", ")),
+            now,
+        )?;
+        record!(
+            INFO,
+            Event::new(module_path!(), Action::Write).with_attrs(serde_json::json!({
+                "revision": receipt.revision.0,
+                "retired": keys,
+            })),
+            "inferred profile facts retired"
+        );
+        Ok(retired)
     }
 
     /// Per-turn profile projection: reads the document now, no caching.
@@ -170,5 +226,95 @@ impl ProfileService {
             "user profile rolled back"
         );
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::profile::{Observation, ObservationKind};
+    use std::path::Path;
+
+    fn service(root: &Path) -> ProfileService {
+        ProfileService::new(
+            crate::infra::markdown_profile_store(root).expect("profile store"),
+            crate::infra::system_clock(),
+        )
+    }
+
+    fn observation(key: &str, value: &str, kind: ObservationKind) -> Observation {
+        Observation {
+            section: SectionKind::Preferences,
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind,
+            confidence: 80,
+        }
+    }
+
+    #[test]
+    fn retire_removes_only_agent_inference_facts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = service(dir.path());
+        service
+            .observe_batch(&[observation("editor", "Neovim", ObservationKind::StableFact)])
+            .expect("seed inference");
+        service
+            .observe_batch(&[observation("tone", "直接点", ObservationKind::Correction)])
+            .expect("seed correction");
+
+        let retired = service
+            .retire_inferred_facts(
+                &[
+                    (SectionKind::Preferences, "editor".to_owned()),
+                    (SectionKind::Preferences, "tone".to_owned()),
+                    (SectionKind::Preferences, "absent".to_owned()),
+                ],
+                "dream test",
+            )
+            .expect("retire");
+        assert_eq!(retired, 1, "only the inferred fact is retired");
+
+        let profile = service
+            .current()
+            .expect("load")
+            .state
+            .expect("profile exists");
+        assert!(profile.fact(SectionKind::Preferences, "editor").is_none());
+        let tone = profile
+            .fact(SectionKind::Preferences, "tone")
+            .expect("user fact survives");
+        assert!(matches!(
+            tone.source,
+            ChangeSource::UserConversationCorrection
+        ));
+    }
+
+    #[test]
+    fn retire_with_no_matching_targets_commits_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = service(dir.path());
+        service
+            .observe_batch(&[observation("tone", "直接点", ObservationKind::Correction)])
+            .expect("seed");
+        let before = service.current().expect("load").fingerprint;
+        let retired = service
+            .retire_inferred_facts(
+                &[(SectionKind::Preferences, "tone".to_owned())],
+                "dream test",
+            )
+            .expect("retire");
+        assert_eq!(retired, 0);
+        assert_eq!(
+            service.current().expect("load").fingerprint,
+            before,
+            "an empty retirement leaves no revision behind"
+        );
+        assert_eq!(
+            service
+                .retire_inferred_facts(&[], "dream test")
+                .expect("empty retire"),
+            0
+        );
     }
 }

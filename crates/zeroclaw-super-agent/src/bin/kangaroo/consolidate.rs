@@ -19,9 +19,17 @@ fn fluent_args(key: &str, args: &[(&str, &str)]) -> String {
 }
 
 /// Render one shared consolidation pass. Manual entry point (`kangaroo
-/// consolidate`) for verification and external callers.
+/// consolidate`) for verification and external callers. Builds its own
+/// ProfileService over the same root: the promotion stage at the end of the
+/// pass writes through the profile's own adjudication.
 pub async fn run(root: &Path, config: &zeroclaw_config::schema::Config) -> Result<()> {
-    let summary = run_pass(root, config).await?;
+    let profile_store = zeroclaw_super_agent::infra::markdown_profile_store(root)?;
+    let clock = zeroclaw_super_agent::infra::system_clock();
+    let profile_service = zeroclaw_super_agent::application::profile_service::ProfileService::new(
+        profile_store,
+        clock,
+    );
+    let summary = run_pass(root, config, &profile_service).await?;
     if summary.already_running {
         println!("{}", fluent("cli-consolidate-already-running"));
         return Ok(());

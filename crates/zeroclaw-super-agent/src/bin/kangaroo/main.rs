@@ -186,6 +186,12 @@ async fn main() -> Result<()> {
         Arc::new(zeroclaw_super_agent::domain::selfhood::negotiation::ValidationPolicy),
     ));
     let profile_service = Arc::new(ProfileService::new(profile_store, Arc::clone(&clock)));
+    // I-DR1: the profile_update tool's inferred observations queue here for
+    // the dream's promotion stage; both tool surfaces (CLI loop and serve)
+    // share this one queue instance.
+    let pending_queue = Arc::new(zeroclaw_super_agent::infra::pending::PendingQueue::new(
+        zeroclaw_super_agent::infra::pending::pending_observations_path(&root),
+    ));
 
     // First run: the questionnaire adapter assembles the draft and commits
     // it through the core use case. An abandoned questionnaire writes
@@ -209,7 +215,7 @@ async fn main() -> Result<()> {
     // capabilities. It reuses the services and the intake state above, so a
     // first run completes the questionnaire before the server starts.
     if std::env::args().nth(1).as_deref() == Some("serve") {
-        return serve::run(&root, config, self_service, profile_service).await;
+        return serve::run(&root, config, self_service, profile_service, pending_queue).await;
     }
 
     // Capability generation: config-backed sources, the profile tools
@@ -233,10 +239,13 @@ async fn main() -> Result<()> {
         Arc::clone(&board),
     ));
     let mut capabilities = RuntimeCapabilities::config_backed_with_observer(probe.clone());
-    capabilities.tools = Arc::new(ProfileToolsSource::wrapping(
-        Arc::clone(&profile_service),
-        zeroclaw_runtime::composition::defaults::native_compat_registry,
-    ));
+    capabilities.tools = Arc::new(
+        ProfileToolsSource::wrapping(
+            Arc::clone(&profile_service),
+            zeroclaw_runtime::composition::defaults::native_compat_registry,
+        )
+        .with_pending_queue(Arc::clone(&pending_queue)),
+    );
     let real_memory: Arc<dyn zeroclaw_memory::Memory> = Arc::from(zeroclaw_memory::create_memory(
         &config.memory,
         &root.join("memory"),
@@ -257,7 +266,7 @@ async fn main() -> Result<()> {
     // background pass. The conversation loop is never blocked; a failure is
     // logged and left for the next launch (no in-session retry). The gate
     // and the pass live in `daemon`, shared with the long-running host.
-    daemon::start_startup_catch_up(root.clone(), config.clone());
+    daemon::start_startup_catch_up(root.clone(), config.clone(), Arc::clone(&profile_service));
 
     // M3 orchestration (minimal closure): the deterministic Router opens the
     // decision, the in-memory board supervises worker-bound turns, and the

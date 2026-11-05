@@ -5,10 +5,12 @@
 //! the same `consolidation::run_pass` — this module owns only the timing.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use zeroclaw_config::schema::Config;
 use zeroclaw_log::{Action, Event, EventOutcome, record};
+use zeroclaw_super_agent::application::profile_service::ProfileService;
 use zeroclaw_super_agent::infra::consolidation;
 use zeroclaw_super_agent::infra::episodes;
 
@@ -24,7 +26,7 @@ fn due(root: &Path) -> anyhow::Result<bool> {
 
 /// The CLI's startup catch-up: exactly one attempt when the gate is open.
 /// When the gate is closed nothing is spawned, so an idle launch stays idle.
-pub fn start_startup_catch_up(root: PathBuf, config: Config) {
+pub fn start_startup_catch_up(root: PathBuf, config: Config, profile_service: Arc<ProfileService>) {
     match due(&root) {
         Ok(true) => {}
         Ok(false) => return,
@@ -41,32 +43,32 @@ pub fn start_startup_catch_up(root: PathBuf, config: Config) {
     }
     println!("{}", crate::cli("cli-consolidate-started"));
     zeroclaw_spawn::spawn!(async move {
-        run_and_report(&root, &config).await;
+        run_and_report(&root, &config, &profile_service).await;
     });
 }
 
 /// The long-running host's schedule: one startup attempt, then a periodic
 /// gate check. Errors are logged and left for the next tick — never retried
 /// in a tight loop.
-pub fn start_scheduler(root: PathBuf, config: Config) {
+pub fn start_scheduler(root: PathBuf, config: Config, profile_service: Arc<ProfileService>) {
     zeroclaw_spawn::spawn!(async move {
-        run_if_due(&root, &config).await;
+        run_if_due(&root, &config, &profile_service).await;
         let mut ticker = tokio::time::interval(Duration::from_secs(SCHEDULER_CHECK_MINUTES * 60));
         // The first tick resolves immediately; the startup attempt above
         // already covered it.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            run_if_due(&root, &config).await;
+            run_if_due(&root, &config, &profile_service).await;
         }
     });
 }
 
-async fn run_if_due(root: &Path, config: &Config) {
+async fn run_if_due(root: &Path, config: &Config, profile_service: &ProfileService) {
     match due(root) {
         Ok(true) => {
             println!("{}", crate::cli("cli-consolidate-started"));
-            run_and_report(root, config).await;
+            run_and_report(root, config, profile_service).await;
         }
         Ok(false) => {}
         Err(error) => record!(
@@ -79,8 +81,8 @@ async fn run_if_due(root: &Path, config: &Config) {
     }
 }
 
-async fn run_and_report(root: &Path, config: &Config) {
-    match consolidation::run_pass(root, config).await {
+async fn run_and_report(root: &Path, config: &Config, profile_service: &ProfileService) {
+    match consolidation::run_pass(root, config, profile_service).await {
         // Another pass holds the lock: this tick is skipped silently, the
         // next tick re-checks.
         Ok(summary) if summary.already_running => {}
